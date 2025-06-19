@@ -1,0 +1,129 @@
+### Detailed User Stories with Subtasks for Secure File Exchange Platform
+
+---
+
+#### **Epic: SFTP Ingestion (SftpWorkerService)**
+**User Story 1:** As a System, I want to securely download files from vendor SFTP servers to ensure reliable ingestion.  
+**Subtasks:**  
+1. Implement SFTP client with SSH key authentication (using `SSH.NET`).  
+2. Design vendor-specific configuration loader (JSON/YAML) in `VendorConfig`.  
+3. Add encrypted credential storage (Azure Key Vault integration).  
+4. Create polling scheduler with exponential backoff for SFTP checks.  
+5. Publish `FileReceivedMessage` (Protobuf) to RabbitMQ after successful download.  
+6. Implement DLQ handling for failed downloads.  
+7. Add OpenTelemetry tracing for download operations.  
+
+---
+
+#### **Epic: File Processing & Validation (FileProcessorService + BusinessRulesService)**  
+**User Story 1:** As a System, I want to validate files using vendor-specific rules to enforce data integrity.  
+**Subtasks:**  
+1. Consume `FileReceivedMessage` from RabbitMQ with retry logic.  
+2. Decrypt files (AES-256) and parse formats (CSV/XML/JSON) using pluggable serializers.  
+3. Call `BusinessRulesService` via gRPC with mutual TLS (proto: `ValidateRecordsRequest`).  
+4. Implement rule engine in `BusinessRulesService` to validate records against vendor configs.  
+5. Generate `ValidationResult` with `Discrepancy` list for invalid records.  
+6. Archive processed files with audit metadata.  
+
+**User Story 2:** As a Platform Admin, I want to define validation rules via configuration.  
+**Subtasks:**  
+1. Design rule schema (e.g., regex, range checks) in `VendorConfig`.  
+2. Build admin API in `BusinessRulesService` to reload rules without restart.  
+3. Add validation rule unit tests (xUnit).  
+
+---
+
+#### **Epic: Email Notification (EmailNotificationService)**  
+**User Story 1:** As a System, I want to send discrepancy alerts to operations teams.  
+**Subtasks:**  
+1. Consume `EmailDiscrepancyNotification` messages from RabbitMQ.  
+2. Integrate SMTP client (MailKit) with STARTTLS support.  
+3. Design email templates with vendor-specific placeholders.  
+4. Attach discrepancy reports (CSV) with invalid records.  
+5. Implement dead-letter queue for failed emails.  
+
+**User Story 2:** As a Platform Admin, I want to receive alerts for validation failures.  
+**Subtasks:**  
+1. Configure admin email groups per vendor in `VendorConfig`.  
+2. Add alert severity levels (Critical/Warning) to notifications.  
+
+---
+
+#### **Epic: Issue Email Parsing (IssueEmailMonitorService)**  
+**User Story 1:** As a System, I want to process vendor-reported issues via email.  
+**Subtasks:**  
+1. Poll IMAP inbox (using `MailKit`) on scheduled intervals.  
+2. Filter vendor emails using configured identifiers (e.g., sender domain).  
+3. Parse email content/attachments into `ThirdPartyIssueReportedMessage`.  
+4. Publish messages to RabbitMQ for downstream processing.  
+5. Move processed emails to "Resolved" IMAP folder.  
+
+**User Story 2:** As a System, I want to link issues to original file records.  
+**Subtasks:**  
+1. Implement `FileIssueProcessorService` to correlate issues with file metadata.  
+2. Log linked issues to audit database with timestamps.  
+
+---
+
+#### **Epic: Common & Infrastructure**  
+**User Story 1:** As a DevOps, I want secure, observable services.  
+**Subtasks:**  
+1. Configure RabbitMQ TLS with certificate authentication.  
+2. Set up mutual TLS for gRPC between `FileProcessorService` and `BusinessRulesService`.  
+3. Add health endpoints (/health) for all services.  
+4. Integrate Serilog + OpenTelemetry → Seq/ELK.  
+5. Implement secrets management (Azure Key Vault/Hashicorp Vault).  
+
+**User Story 2:** As a Developer, I want reusable shared libraries.  
+**Subtasks:**  
+1. Build `Contracts` lib with Protobuf schemas (compile with `protoc`).  
+2. Create `Common` lib with:  
+   - AES-256 encryption helpers  
+   - Polly retry policies  
+   - Pluggable serializer interface (Protobuf/JSON)  
+3. Develop `VendorConfig` loader with schema validation.  
+
+---
+
+### Key Protobuf Messages
+```protobuf
+// Contracts/FileReceived.proto
+message FileReceivedMessage {
+  string vendor_id = 1;
+  string file_path = 2;
+  int64 received_utc = 3;
+}
+
+// Contracts/Validation.proto
+message ValidateRecordsRequest {
+  string vendor_id = 1;
+  repeated bytes records = 2; // Serialized data
+}
+
+message Discrepancy {
+  int32 record_index = 1;
+  string field = 2;
+  string error_code = 3;
+}
+
+// Contracts/Email.proto
+message EmailDiscrepancyNotification {
+  string vendor_id = 1;
+  repeated Discrepancy discrepancies = 2;
+}
+```
+
+---
+
+### Technical Notes:
+1. **Security:**  
+   - Use `SshClient` (SSH.NET) for SFTP with key-based auth.  
+   - Encrypt files at rest via `AesGcm` (.NET 8).  
+2. **Resilience:**  
+   - RabbitMQ: Retry policies → DLQ after 5 failures.  
+   - gRPC: Deadline timeouts + circuit breakers.  
+3. **Observability:**  
+   - Tag OpenTelemetry traces with `vendor_id`.  
+   - Log structured data (Serilog enrichers).  
+
+This breakdown ensures end-to-end coverage while adhering to .NET 8 microservices best practices.
