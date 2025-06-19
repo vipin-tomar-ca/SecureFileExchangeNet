@@ -18,6 +18,7 @@ builder.Services.AddSerilog();
 
 // Register services
 builder.Services.AddSingleton<IMessageSerializer, JsonMessageSerializer>();
+builder.Services.AddSingleton<IRabbitMqService, RabbitMqService>();
 builder.Services.AddScoped<ISftpService, SftpService>();
 builder.Services.Configure<VendorSettings>(builder.Configuration.GetSection("VendorSettings"));
 builder.Services.AddHostedService<Worker>();

@@ -1,7 +1,8 @@
+
 entrypoint = "main.cs"
 
 hidden = ["bin", "obj"]
-modules = ["dotnet-7.0"]
+modules = ["dotnet-8.0"]
 
 [env]
 DOTNET_NOLOGO = "1"
@@ -22,15 +23,6 @@ deploymentTarget = "cloudrun"
 runButton = "Run API Gateway"
 
 [[workflows.workflow]]
-name = "Run"
-author = 42493567
-mode = "sequential"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "dotnet run"
-
-[[workflows.workflow]]
 name = "Run API Gateway"
 author = 42493567
 mode = "sequential"
@@ -47,3 +39,21 @@ mode = "sequential"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "dotnet build"
+
+[[workflows.workflow]]
+name = "Run SFTP Worker"
+author = 42493567
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd SftpWorkerService && dotnet run"
+
+[[workflows.workflow]]
+name = "Run Business Rules Service"
+author = 42493567
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd BusinessRulesService && dotnet run"

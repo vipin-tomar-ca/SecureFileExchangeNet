@@ -8,11 +8,15 @@ public class FileProcessorService : IFileProcessorService
 {
     private readonly ILogger<FileProcessorService> _logger;
     private readonly BusinessRulesService.BusinessRulesServiceClient _businessRulesClient;
+    private readonly IRabbitMqService _rabbitMqService;
 
-    public FileProcessorService(ILogger<FileProcessorService> logger, BusinessRulesService.BusinessRulesServiceClient businessRulesClient)
+    public FileProcessorService(ILogger<FileProcessorService> logger, 
+                               BusinessRulesService.BusinessRulesServiceClient businessRulesClient,
+                               IRabbitMqService rabbitMqService)
     {
         _logger = logger;
         _businessRulesClient = businessRulesClient;
+        _rabbitMqService = rabbitMqService;
     }
 
     public async Task ProcessFileAsync(FileReceivedMessage message, CancellationToken cancellationToken = default)
@@ -38,7 +42,16 @@ public class FileProcessorService : IFileProcessorService
                 _logger.LogWarning("File {FileId} validation failed with {DiscrepancyCount} discrepancies", 
                     message.FileId, validationResult.Discrepancies.Count);
 
-                // TODO: Publish email notification message to RabbitMQ
+                var emailNotification = new EmailDiscrepancyNotification
+                {
+                    VendorId = message.VendorId,
+                    FileId = message.FileId,
+                    CorrelationId = message.CorrelationId
+                };
+                emailNotification.Discrepancies.AddRange(validationResult.Discrepancies);
+
+                // Publish to email notification queue
+                await _rabbitMqService.PublishAsync("email.discrepancy", emailNotification, cancellationToken);
             }
             else
             {
