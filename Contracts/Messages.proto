@@ -1,0 +1,67 @@
+
+syntax = "proto3";
+
+option csharp_namespace = "SecureFileExchange.Contracts";
+
+package securefileexchange;
+
+// File processing messages
+message FileReceivedMessage {
+  string file_id = 1;
+  string vendor_id = 2;
+  string file_path = 3;
+  string file_hash = 4;
+  int64 file_size = 5;
+  string received_at = 6;
+  string correlation_id = 7;
+}
+
+// Validation messages
+message ValidateRecordsRequest {
+  string vendor_id = 1;
+  repeated FileRecord records = 2;
+  string correlation_id = 3;
+}
+
+message FileRecord {
+  string record_id = 1;
+  map<string, string> fields = 2;
+}
+
+message ValidationResult {
+  bool is_valid = 1;
+  repeated Discrepancy discrepancies = 2;
+  string correlation_id = 3;
+}
+
+message Discrepancy {
+  string record_id = 1;
+  string field_name = 2;
+  string expected_value = 3;
+  string actual_value = 4;
+  string rule_type = 5;
+  string description = 6;
+}
+
+// Email notification messages
+message EmailDiscrepancyNotification {
+  string vendor_id = 1;
+  string file_id = 2;
+  repeated Discrepancy discrepancies = 3;
+  string correlation_id = 4;
+}
+
+// Third-party issue messages
+message ThirdPartyIssueReportedMessage {
+  string vendor_id = 1;
+  string file_id = 2;
+  string issue_description = 3;
+  string email_subject = 4;
+  string received_at = 5;
+  string correlation_id = 6;
+}
+
+// gRPC service definition
+service BusinessRulesService {
+  rpc ValidateRecords(ValidateRecordsRequest) returns (ValidationResult);
+}

@@ -1,7 +1,58 @@
-using System;
 
-class Program {
-  public static void Main (string[] args) {
-    Console.WriteLine ("Hello World");
-  }
+using Serilog;
+using OpenTelemetry.Trace;
+using SecureFileExchange.Common;
+using SecureFileExchange.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Configure Serilog
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .CreateLogger();
+
+builder.Host.UseSerilog();
+
+// Add services to the container
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// Add OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddConsoleExporter());
+
+// Add health checks
+builder.Services.AddHealthChecks();
+
+// Register application services
+builder.Services.AddSingleton<IMessageSerializer, JsonMessageSerializer>();
+builder.Services.AddScoped<ISftpService, SftpService>();
+builder.Services.AddScoped<IFileProcessorService, FileProcessorService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+
+// Add gRPC services
+builder.Services.AddGrpc();
+
+var app = builder.Build();
+
+// Configure the HTTP request pipeline
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
 }
+
+app.UseHttpsRedirection();
+app.UseAuthorization();
+app.MapControllers();
+app.MapHealthChecks("/health");
+
+// Map gRPC services
+app.MapGrpcService<BusinessRulesGrpcService>();
+
+app.Run("http://0.0.0.0:5000");
