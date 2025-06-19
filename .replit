@@ -19,7 +19,7 @@ run = ["dotnet", "run"]
 deploymentTarget = "cloudrun"
 
 [workflows]
-runButton = "Run"
+runButton = "Run API Gateway"
 
 [[workflows.workflow]]
 name = "Run"
@@ -29,3 +29,21 @@ mode = "sequential"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "dotnet run"
+
+[[workflows.workflow]]
+name = "Run API Gateway"
+author = 42493567
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd ApiGateway && dotnet run"
+
+[[workflows.workflow]]
+name = "Build All Services"
+author = 42493567
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "dotnet build"

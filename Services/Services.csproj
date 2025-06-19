@@ -5,22 +5,23 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SecureFileExchange.Services</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="SSH.NET" Version="2023.0.0" />
     <PackageReference Include="MailKit" Version="4.3.0" />
-    <PackageReference Include="Grpc.AspNetCore" Version="2.59.0" />
-    <PackageReference Include="Google.Protobuf" Version="3.25.1" />
     <PackageReference Include="CsvHelper" Version="30.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.60.0" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.60.0" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Contracts\Contracts.csproj" />
-    <ProjectReference Include="..\VendorConfig\VendorConfig.csproj" />
-    <ProjectReference Include="..\Common\Common.csproj" />
+    <ProjectReference Include="../Contracts/Contracts.csproj" />
+    <ProjectReference Include="../Common/Common.csproj" />
+    <ProjectReference Include="../VendorConfig/VendorConfig.csproj" />
   </ItemGroup>
 
 </Project>

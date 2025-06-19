@@ -5,11 +5,13 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SecureFileExchange.Contracts</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Google.Protobuf" Version="3.25.2" />
     <PackageReference Include="Grpc.Tools" Version="2.60.0" PrivateAssets="All" />
+    <PackageReference Include="Google.Protobuf" Version="3.25.1" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.60.0" />
   </ItemGroup>
 
   <ItemGroup>
