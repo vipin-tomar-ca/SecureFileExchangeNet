@@ -1,0 +1,93 @@
+Microservices (All .NET 8)
+
+SftpWorkerService – Handles SFTP polling, download, and publishing to RabbitMQ
+
+FileProcessorService – Consumes file messages, parses records, calls validation service
+
+BusinessRulesService – A gRPC microservice that validates file content with per-vendor rules
+
+EmailNotificationService – Sends email reports of internal discrepancies
+
+IssueEmailMonitorService – Polls IMAP inbox for vendor emails reporting issues
+
+📚 Shared Libraries
+
+Contracts – Protobuf schemas and DTOs
+
+Common – Encryption, logging, retry logic, pluggable serializers
+
+VendorConfig – Configuration and rules per vendor
+
+📦 Messaging
+
+RabbitMQ with TLS, DLQ, retries
+
+🔒 Security
+
+SFTP with SSH keys, TLS 1.2+
+
+SMTP/IMAP with STARTTLS or 3rd party email API
+
+AES-256 encryption at rest
+
+Mutual TLS for gRPC
+
+📊 Observability
+
+OpenTelemetry for tracing
+
+Serilog for logging (to Seq or ELK)
+
+Health endpoints on all services
+
+🔄 Process Flow (E2E)
+
+SftpWorkerService pulls files from configured vendor SFTP
+
+File metadata is published to file.received queue as FileReceivedMessage
+
+FileProcessorService consumes and parses file, then calls BusinessRulesService over gRPC
+
+If discrepancies found, EmailNotificationService formats and sends notification
+
+Meanwhile, IssueEmailMonitorService listens to mailbox for emails from vendors and publishes ThirdPartyIssueReportedMessage
+
+FileIssueProcessorService logs and links external issues to file records
+
+📂 Project Structure
+
+SecureFileExchange.sln
+│
+├── SftpWorkerService (.NET Worker)
+├── FileProcessorService (.NET Worker)
+├── BusinessRulesService (.NET gRPC Service)
+├── EmailNotificationService (.NET Worker)
+├── IssueEmailMonitorService (.NET Worker)
+│
+├── Contracts (Protobuf/DTOs)
+├── Common (Utils, Serializers, Retry, Email)
+├── VendorConfig (Per-vendor settings)
+└── Tests (xUnit/NUnit)
+
+🧾 User Stories & Tasks
+
+👤 As a Platform Admin
+
+I want to onboard a new vendor via config file or UI
+
+I want to define validation rules for each vendor
+
+I want to receive alerts when a file fails validation
+
+👤 As a System
+
+I want to download files from each vendor over SFTP securely
+
+I want to validate and route file data to appropriate business rules
+
+I want to notify operations if an issue is found
+
+I want to log and persist all steps for auditing
+
+I want to listen for incoming issue reports via email
+
