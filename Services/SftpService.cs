@@ -1,113 +1,149 @@
 
 using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using Renci.SshNet;
 using SecureFileExchange.Contracts;
 using SecureFileExchange.VendorConfig;
+using SecureFileExchange.Common;
 
 namespace SecureFileExchange.Services;
+
+public interface ISftpService
+{
+    Task<List<FileReceivedMessage>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default);
+    Task<byte[]> DownloadFileAsync(string vendorId, string remoteFilePath, CancellationToken cancellationToken = default);
+}
 
 public class SftpService : ISftpService
 {
     private readonly ILogger<SftpService> _logger;
-    private readonly IConfiguration _configuration;
+    private readonly VendorSettings _vendorSettings;
+    private readonly IRabbitMqService _rabbitMqService;
 
-    public SftpService(ILogger<SftpService> logger, IConfiguration configuration)
+    public SftpService(
+        ILogger<SftpService> logger,
+        IOptions<VendorSettings> vendorSettings,
+        IRabbitMqService rabbitMqService)
     {
         _logger = logger;
-        _configuration = configuration;
+        _vendorSettings = vendorSettings.Value;
+        _rabbitMqService = rabbitMqService;
     }
 
     public async Task<List<FileReceivedMessage>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default)
     {
-        var vendorConfig = GetVendorConfig(vendorId);
+        var vendor = _vendorSettings.Vendors.FirstOrDefault(v => v.Id == vendorId);
+        if (vendor == null)
+        {
+            _logger.LogWarning("Vendor {VendorId} not found", vendorId);
+            return new List<FileReceivedMessage>();
+        }
+
         var files = new List<FileReceivedMessage>();
 
         try
         {
-            using var privateKey = new PrivateKeyFile(vendorConfig.Sftp.PrivateKeyPath);
-            var connectionInfo = new ConnectionInfo(vendorConfig.Sftp.Host, vendorConfig.Sftp.Port, vendorConfig.Sftp.Username, privateKey);
+            using var client = CreateSftpClient(vendor);
+            client.Connect();
 
-            using var sftpClient = new SftpClient(connectionInfo);
-            await Task.Run(() => sftpClient.Connect(), cancellationToken);
-
-            var remoteFiles = sftpClient.ListDirectory(vendorConfig.Sftp.RemotePath)
-                .Where(f => f.IsRegularFile && !f.Name.StartsWith('.'))
+            var remoteFiles = client.ListDirectory(vendor.SftpSettings.RemotePath)
+                .Where(f => f.IsRegularFile && !f.Name.StartsWith("."))
                 .ToList();
 
-            foreach (var remoteFile in remoteFiles)
+            foreach (var file in remoteFiles)
             {
-                var localFilePath = Path.Combine(vendorConfig.Sftp.LocalPath, remoteFile.Name);
-                
-                if (await DownloadFileAsync(vendorId, remoteFile.FullName, localFilePath, cancellationToken))
+                try
                 {
-                    var fileHash = await CalculateFileHashAsync(localFilePath);
-                    var correlationId = Guid.NewGuid().ToString();
+                    var fileData = await DownloadFileAsync(vendorId, file.FullName, cancellationToken);
+                    var fileHash = ComputeFileHash(fileData);
+                    
+                    var localPath = Path.Combine(vendor.SftpSettings.LocalPath, file.Name);
+                    await File.WriteAllBytesAsync(localPath, fileData, cancellationToken);
 
-                    files.Add(new FileReceivedMessage
+                    var message = new FileReceivedMessage
                     {
                         FileId = Guid.NewGuid().ToString(),
                         VendorId = vendorId,
-                        FilePath = localFilePath,
+                        FilePath = localPath,
                         FileHash = fileHash,
-                        FileSize = remoteFile.Length,
-                        ReceivedAt = DateTime.UtcNow.ToString("O"),
-                        CorrelationId = correlationId
-                    });
+                        FileSize = fileData.Length,
+                        ReceivedAt = DateTimeOffset.UtcNow.ToString("O"),
+                        CorrelationId = Guid.NewGuid().ToString()
+                    };
 
-                    _logger.LogInformation("Downloaded file {FileName} from vendor {VendorId} with correlation ID {CorrelationId}", 
-                        remoteFile.Name, vendorId, correlationId);
+                    files.Add(message);
+                    _logger.LogInformation("Downloaded file {FileName} from vendor {VendorId}", file.Name, vendorId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to download file {FileName} from vendor {VendorId}", file.Name, vendorId);
                 }
             }
 
-            sftpClient.Disconnect();
+            client.Disconnect();
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error polling SFTP for vendor {VendorId}", vendorId);
+            _logger.LogError(ex, "Failed to connect to SFTP server for vendor {VendorId}", vendorId);
         }
 
         return files;
     }
 
-    public async Task<bool> DownloadFileAsync(string vendorId, string remoteFilePath, string localFilePath, CancellationToken cancellationToken = default)
+    public async Task<byte[]> DownloadFileAsync(string vendorId, string remoteFilePath, CancellationToken cancellationToken = default)
     {
-        try
+        var vendor = _vendorSettings.Vendors.FirstOrDefault(v => v.Id == vendorId);
+        if (vendor == null)
         {
-            var vendorConfig = GetVendorConfig(vendorId);
-            
-            Directory.CreateDirectory(Path.GetDirectoryName(localFilePath)!);
-
-            using var privateKey = new PrivateKeyFile(vendorConfig.Sftp.PrivateKeyPath);
-            var connectionInfo = new ConnectionInfo(vendorConfig.Sftp.Host, vendorConfig.Sftp.Port, vendorConfig.Sftp.Username, privateKey);
-
-            using var sftpClient = new SftpClient(connectionInfo);
-            await Task.Run(() => sftpClient.Connect(), cancellationToken);
-
-            using var fileStream = File.OpenWrite(localFilePath);
-            await Task.Run(() => sftpClient.DownloadFile(remoteFilePath, fileStream), cancellationToken);
-
-            sftpClient.Disconnect();
-            return true;
+            throw new ArgumentException($"Vendor {vendorId} not found");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error downloading file {RemoteFilePath} for vendor {VendorId}", remoteFilePath, vendorId);
-            return false;
-        }
+
+        using var client = CreateSftpClient(vendor);
+        client.Connect();
+
+        using var stream = new MemoryStream();
+        client.DownloadFile(remoteFilePath, stream);
+        
+        client.Disconnect();
+        
+        return stream.ToArray();
     }
 
-    public async Task<string> CalculateFileHashAsync(string filePath)
+    private SftpClient CreateSftpClient(VendorConfiguration vendor)
+    {
+        var connectionInfo = new ConnectionInfo(
+            vendor.SftpSettings.Host,
+            vendor.SftpSettings.Port,
+            vendor.SftpSettings.Username,
+            CreateAuthenticationMethods(vendor.SftpSettings)
+        );
+
+        return new SftpClient(connectionInfo);
+    }
+
+    private AuthenticationMethod[] CreateAuthenticationMethods(SftpConfiguration sftpConfig)
+    {
+        var methods = new List<AuthenticationMethod>();
+
+        if (!string.IsNullOrEmpty(sftpConfig.PrivateKeyPath))
+        {
+            var privateKeyFile = new PrivateKeyFile(sftpConfig.PrivateKeyPath, sftpConfig.PrivateKeyPassphrase);
+            methods.Add(new PrivateKeyAuthenticationMethod(sftpConfig.Username, privateKeyFile));
+        }
+
+        if (!string.IsNullOrEmpty(sftpConfig.Password))
+        {
+            methods.Add(new PasswordAuthenticationMethod(sftpConfig.Username, sftpConfig.Password));
+        }
+
+        return methods.ToArray();
+    }
+
+    private string ComputeFileHash(byte[] fileData)
     {
         using var sha256 = SHA256.Create();
-        using var fileStream = File.OpenRead(filePath);
-        var hashBytes = await sha256.ComputeHashAsync(fileStream);
+        var hashBytes = sha256.ComputeHash(fileData);
         return Convert.ToHexString(hashBytes);
-    }
-
-    private VendorSettings GetVendorConfig(string vendorId)
-    {
-        var vendorSection = _configuration.GetSection($"Vendors:{vendorId}");
-        return vendorSection.Get<VendorSettings>() ?? throw new InvalidOperationException($"Vendor configuration not found for {vendorId}");
     }
 }

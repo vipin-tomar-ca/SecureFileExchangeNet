@@ -1,47 +1,50 @@
 
 using System.Text.Json;
+using System.Text;
+using System.Xml;
 using SecureFileExchange.Contracts;
+using SecureFileExchange.VendorConfig;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
+using Grpc.Net.Client;
+using SecureFileExchange.Common;
 
 namespace SecureFileExchange.Services;
 
 public class FileProcessorService : IFileProcessorService
 {
     private readonly ILogger<FileProcessorService> _logger;
-    private readonly BusinessRulesService.BusinessRulesServiceClient _businessRulesClient;
+    private readonly VendorSettings _vendorSettings;
     private readonly IRabbitMqService _rabbitMqService;
+    private readonly IEncryptionService _encryptionService;
 
-    public FileProcessorService(ILogger<FileProcessorService> logger, 
-                               BusinessRulesService.BusinessRulesServiceClient businessRulesClient,
-                               IRabbitMqService rabbitMqService)
+    public FileProcessorService(
+        ILogger<FileProcessorService> logger,
+        IOptions<VendorSettings> vendorSettings,
+        IRabbitMqService rabbitMqService,
+        IEncryptionService encryptionService)
     {
         _logger = logger;
-        _businessRulesClient = businessRulesClient;
+        _vendorSettings = vendorSettings.Value;
         _rabbitMqService = rabbitMqService;
+        _encryptionService = encryptionService;
     }
 
     public async Task ProcessFileAsync(FileReceivedMessage message, CancellationToken cancellationToken = default)
     {
+        _logger.LogInformation("Processing file {FileId} for vendor {VendorId}", message.FileId, message.VendorId);
+
         try
         {
-            _logger.LogInformation("Processing file {FileId} for vendor {VendorId} with correlation ID {CorrelationId}", 
-                message.FileId, message.VendorId, message.CorrelationId);
-
+            // Parse the file
             var records = await ParseFileAsync(message.FilePath, message.VendorId, cancellationToken);
 
-            var validationRequest = new ValidateRecordsRequest
-            {
-                VendorId = message.VendorId,
-                CorrelationId = message.CorrelationId
-            };
-            validationRequest.Records.AddRange(records);
-
-            var validationResult = await _businessRulesClient.ValidateRecordsAsync(validationRequest, cancellationToken: cancellationToken);
+            // Validate records using gRPC service
+            var validationResult = await ValidateRecordsAsync(message.VendorId, records, message.CorrelationId, cancellationToken);
 
             if (!validationResult.IsValid)
             {
-                _logger.LogWarning("File {FileId} validation failed with {DiscrepancyCount} discrepancies", 
-                    message.FileId, validationResult.Discrepancies.Count);
-
+                // Send email notification for discrepancies
                 var emailNotification = new EmailDiscrepancyNotification
                 {
                     VendorId = message.VendorId,
@@ -50,70 +53,52 @@ public class FileProcessorService : IFileProcessorService
                 };
                 emailNotification.Discrepancies.AddRange(validationResult.Discrepancies);
 
-                // Publish to email notification queue
                 await _rabbitMqService.PublishAsync("email.discrepancy", emailNotification, cancellationToken);
+                _logger.LogWarning("File {FileId} has {Count} validation discrepancies", message.FileId, validationResult.Discrepancies.Count);
             }
-            else
-            {
-                _logger.LogInformation("File {FileId} processed successfully", message.FileId);
-            }
+
+            // Archive the processed file
+            await ArchiveFileAsync(message, validationResult, cancellationToken);
+
+            _logger.LogInformation("Successfully processed file {FileId}", message.FileId);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing file {FileId} with correlation ID {CorrelationId}", 
-                message.FileId, message.CorrelationId);
+            _logger.LogError(ex, "Failed to process file {FileId}", message.FileId);
+            throw;
         }
     }
 
     public async Task<List<FileRecord>> ParseFileAsync(string filePath, string vendorId, CancellationToken cancellationToken = default)
     {
-        var records = new List<FileRecord>();
-
-        try
+        var vendor = _vendorSettings.Vendors.FirstOrDefault(v => v.Id == vendorId);
+        if (vendor == null)
         {
-            var extension = Path.GetExtension(filePath).ToLowerInvariant();
-
-            switch (extension)
-            {
-                case ".json":
-                    records = await ParseJsonFileAsync(filePath, cancellationToken);
-                    break;
-                case ".csv":
-                    records = await ParseCsvFileAsync(filePath, cancellationToken);
-                    break;
-                case ".xml":
-                    records = await ParseXmlFileAsync(filePath, cancellationToken);
-                    break;
-                default:
-                    throw new NotSupportedException($"File format {extension} is not supported");
-            }
-
-            _logger.LogInformation("Parsed {RecordCount} records from file {FilePath}", records.Count, filePath);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error parsing file {FilePath}", filePath);
+            throw new ArgumentException($"Vendor {vendorId} not found");
         }
 
-        return records;
-    }
+        var fileExtension = Path.GetExtension(filePath).ToLowerInvariant();
+        var fileContent = await File.ReadAllTextAsync(filePath, cancellationToken);
 
-    private async Task<List<FileRecord>> ParseJsonFileAsync(string filePath, CancellationToken cancellationToken)
-    {
-        var content = await File.ReadAllTextAsync(filePath, cancellationToken);
-        var jsonData = JsonSerializer.Deserialize<List<Dictionary<string, object>>>(content);
-        
-        return jsonData?.Select((item, index) => new FileRecord
+        // Decrypt if necessary
+        if (vendor.FileSettings.IsEncrypted)
         {
-            RecordId = index.ToString(),
-            Fields = { item.ToDictionary(kvp => kvp.Key, kvp => kvp.Value?.ToString() ?? string.Empty) }
-        }).ToList() ?? new List<FileRecord>();
+            fileContent = await _encryptionService.DecryptAsync(fileContent);
+        }
+
+        return fileExtension switch
+        {
+            ".csv" => ParseCsvFile(fileContent, vendor),
+            ".json" => ParseJsonFile(fileContent, vendor),
+            ".xml" => ParseXmlFile(fileContent, vendor),
+            _ => throw new NotSupportedException($"File format {fileExtension} is not supported")
+        };
     }
 
-    private async Task<List<FileRecord>> ParseCsvFileAsync(string filePath, CancellationToken cancellationToken)
+    private List<FileRecord> ParseCsvFile(string content, VendorConfiguration vendor)
     {
         var records = new List<FileRecord>();
-        var lines = await File.ReadAllLinesAsync(filePath, cancellationToken);
+        var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         
         if (lines.Length == 0) return records;
 
@@ -131,7 +116,7 @@ public class FileProcessorService : IFileProcessorService
 
             records.Add(new FileRecord
             {
-                RecordId = i.ToString(),
+                RecordId = $"record_{i}",
                 Fields = { fields }
             });
         }
@@ -139,15 +124,122 @@ public class FileProcessorService : IFileProcessorService
         return records;
     }
 
-    private async Task<List<FileRecord>> ParseXmlFileAsync(string filePath, CancellationToken cancellationToken)
+    private List<FileRecord> ParseJsonFile(string content, VendorConfiguration vendor)
     {
-        // Simple XML parsing implementation - would need more sophisticated parsing for complex XML
         var records = new List<FileRecord>();
-        var content = await File.ReadAllTextAsync(filePath, cancellationToken);
+        using var document = JsonDocument.Parse(content);
         
-        // TODO: Implement XML parsing logic based on vendor-specific schema
-        _logger.LogWarning("XML parsing not fully implemented yet for file {FilePath}", filePath);
-        
+        if (document.RootElement.ValueKind == JsonValueKind.Array)
+        {
+            int recordIndex = 0;
+            foreach (var element in document.RootElement.EnumerateArray())
+            {
+                var fields = new Dictionary<string, string>();
+                foreach (var property in element.EnumerateObject())
+                {
+                    fields[property.Name] = property.Value.ToString();
+                }
+
+                records.Add(new FileRecord
+                {
+                    RecordId = $"record_{recordIndex++}",
+                    Fields = { fields }
+                });
+            }
+        }
+
         return records;
+    }
+
+    private List<FileRecord> ParseXmlFile(string content, VendorConfiguration vendor)
+    {
+        var records = new List<FileRecord>();
+        var doc = new XmlDocument();
+        doc.LoadXml(content);
+
+        var recordNodes = doc.SelectNodes("//record") ?? doc.SelectNodes("//*[position()>1]");
+        if (recordNodes == null) return records;
+
+        int recordIndex = 0;
+        foreach (XmlNode node in recordNodes)
+        {
+            var fields = new Dictionary<string, string>();
+            
+            if (node.Attributes != null)
+            {
+                foreach (XmlAttribute attr in node.Attributes)
+                {
+                    fields[attr.Name] = attr.Value;
+                }
+            }
+
+            foreach (XmlNode child in node.ChildNodes)
+            {
+                if (child.NodeType == XmlNodeType.Element)
+                {
+                    fields[child.Name] = child.InnerText;
+                }
+            }
+
+            records.Add(new FileRecord
+            {
+                RecordId = $"record_{recordIndex++}",
+                Fields = { fields }
+            });
+        }
+
+        return records;
+    }
+
+    private async Task<ValidationResult> ValidateRecordsAsync(string vendorId, List<FileRecord> records, string correlationId, CancellationToken cancellationToken)
+    {
+        var vendor = _vendorSettings.Vendors.FirstOrDefault(v => v.Id == vendorId);
+        if (vendor == null)
+        {
+            throw new ArgumentException($"Vendor {vendorId} not found");
+        }
+
+        using var channel = GrpcChannel.ForAddress(vendor.BusinessRulesServiceUrl);
+        var client = new Contracts.BusinessRulesService.BusinessRulesServiceClient(channel);
+
+        var request = new ValidateRecordsRequest
+        {
+            VendorId = vendorId,
+            CorrelationId = correlationId
+        };
+        request.Records.AddRange(records);
+
+        return await client.ValidateRecordsAsync(request, cancellationToken: cancellationToken);
+    }
+
+    private async Task ArchiveFileAsync(FileReceivedMessage message, ValidationResult validationResult, CancellationToken cancellationToken)
+    {
+        var archivePath = Path.Combine("archive", message.VendorId, DateTime.UtcNow.ToString("yyyy-MM-dd"));
+        Directory.CreateDirectory(archivePath);
+
+        var archivedFilePath = Path.Combine(archivePath, $"{message.FileId}_{Path.GetFileName(message.FilePath)}");
+        File.Copy(message.FilePath, archivedFilePath, true);
+
+        // Create audit metadata
+        var auditData = new
+        {
+            message.FileId,
+            message.VendorId,
+            message.FilePath,
+            message.FileHash,
+            message.FileSize,
+            ProcessedAt = DateTimeOffset.UtcNow,
+            ValidationResult = new
+            {
+                validationResult.IsValid,
+                DiscrepancyCount = validationResult.Discrepancies.Count
+            },
+            ArchivedPath = archivedFilePath
+        };
+
+        var auditFilePath = Path.ChangeExtension(archivedFilePath, ".audit.json");
+        await File.WriteAllTextAsync(auditFilePath, JsonSerializer.Serialize(auditData, new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+
+        _logger.LogInformation("Archived file {FileId} to {ArchivedPath}", message.FileId, archivedFilePath);
     }
 }

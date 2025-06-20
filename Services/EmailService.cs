@@ -5,182 +5,266 @@ using MailKit.Search;
 using MimeKit;
 using SecureFileExchange.Contracts;
 using SecureFileExchange.VendorConfig;
+using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
+using System.Text;
 
 namespace SecureFileExchange.Services;
 
 public class EmailService : IEmailService
 {
     private readonly ILogger<EmailService> _logger;
-    private readonly IConfiguration _configuration;
+    private readonly VendorSettings _vendorSettings;
 
-    public EmailService(ILogger<EmailService> logger, IConfiguration configuration)
+    public EmailService(
+        ILogger<EmailService> logger,
+        IOptions<VendorSettings> vendorSettings)
     {
         _logger = logger;
-        _configuration = configuration;
+        _vendorSettings = vendorSettings.Value;
     }
 
     public async Task SendDiscrepancyNotificationAsync(EmailDiscrepancyNotification notification, CancellationToken cancellationToken = default)
     {
+        var vendor = _vendorSettings.Vendors.FirstOrDefault(v => v.Id == notification.VendorId);
+        if (vendor == null)
+        {
+            _logger.LogWarning("Vendor {VendorId} not found for email notification", notification.VendorId);
+            return;
+        }
+
         try
         {
-            var vendorConfig = GetVendorConfig(notification.VendorId);
+            var message = CreateDiscrepancyEmail(notification, vendor);
+            await SendEmailAsync(message, cancellationToken);
             
-            var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("Secure File Exchange", vendorConfig.Email.FromAddress));
-            message.To.Add(new MailboxAddress("Vendor Contact", vendorConfig.Email.ToAddress));
-            message.Subject = $"File Validation Discrepancies - File ID: {notification.FileId}";
-
-            var bodyBuilder = new BodyBuilder();
-            bodyBuilder.HtmlBody = CreateDiscrepancyEmailHtml(notification);
-            bodyBuilder.TextBody = CreateDiscrepancyEmailText(notification);
-            message.Body = bodyBuilder.ToMessageBody();
-
-            using var client = new SmtpClient();
-            await client.ConnectAsync(_configuration["Email:SmtpHost"], 
-                int.Parse(_configuration["Email:SmtpPort"] ?? "587"), true, cancellationToken);
-            
-            await client.AuthenticateAsync(_configuration["Email:Username"], 
-                _configuration["Email:Password"], cancellationToken);
-            
-            await client.SendAsync(message, cancellationToken);
-            await client.DisconnectAsync(true, cancellationToken);
-
-            _logger.LogInformation("Discrepancy notification sent for file {FileId} to vendor {VendorId}", 
-                notification.FileId, notification.VendorId);
+            _logger.LogInformation("Sent discrepancy notification for file {FileId} to {Recipients}", 
+                notification.FileId, string.Join(", ", vendor.EmailSettings.NotificationRecipients));
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error sending discrepancy notification for file {FileId}", notification.FileId);
+            _logger.LogError(ex, "Failed to send discrepancy notification for file {FileId}", notification.FileId);
+            throw;
         }
     }
 
     public async Task<List<ThirdPartyIssueReportedMessage>> PollEmailInboxAsync(string vendorId, CancellationToken cancellationToken = default)
     {
+        var vendor = _vendorSettings.Vendors.FirstOrDefault(v => v.Id == vendorId);
+        if (vendor == null)
+        {
+            _logger.LogWarning("Vendor {VendorId} not found for email polling", vendorId);
+            return new List<ThirdPartyIssueReportedMessage>();
+        }
+
         var issues = new List<ThirdPartyIssueReportedMessage>();
 
         try
         {
-            var vendorConfig = GetVendorConfig(vendorId);
-
             using var client = new ImapClient();
-            await client.ConnectAsync(vendorConfig.Email.ImapHost, vendorConfig.Email.ImapPort, true, cancellationToken);
-            await client.AuthenticateAsync(vendorConfig.Email.ImapUsername, vendorConfig.Email.ImapPassword, cancellationToken);
+            await client.ConnectAsync(vendor.EmailSettings.ImapHost, vendor.EmailSettings.ImapPort, vendor.EmailSettings.UseStartTls, cancellationToken);
+            await client.AuthenticateAsync(vendor.EmailSettings.Username, vendor.EmailSettings.Password, cancellationToken);
 
-            var inbox = client.Inbox;
-            await inbox.OpenAsync(MailKit.FolderAccess.ReadOnly, cancellationToken);
+            await client.Inbox.OpenAsync(MailKit.FolderAccess.ReadWrite, cancellationToken);
 
-            var searchResults = await inbox.SearchAsync(SearchQuery.NotSeen, cancellationToken);
-
-            foreach (var uid in searchResults)
+            // Search for unread emails from vendor domain
+            var query = SearchQuery.All.And(SearchQuery.Not(SearchQuery.Seen));
+            if (!string.IsNullOrEmpty(vendor.EmailSettings.VendorDomain))
             {
-                var message = await inbox.GetMessageAsync(uid, cancellationToken);
-                
-                var issue = new ThirdPartyIssueReportedMessage
-                {
-                    VendorId = vendorId,
-                    FileId = ExtractFileIdFromSubject(message.Subject),
-                    IssueDescription = message.TextBody ?? message.HtmlBody ?? string.Empty,
-                    EmailSubject = message.Subject,
-                    ReceivedAt = DateTime.UtcNow.ToString("O"),
-                    CorrelationId = Guid.NewGuid().ToString()
-                };
+                query = query.And(SearchQuery.FromContains(vendor.EmailSettings.VendorDomain));
+            }
 
-                issues.Add(issue);
-                _logger.LogInformation("Parsed issue report email for vendor {VendorId} with file ID {FileId}", 
-                    vendorId, issue.FileId);
+            var uids = await client.Inbox.SearchAsync(query, cancellationToken);
+
+            foreach (var uid in uids)
+            {
+                var message = await client.Inbox.GetMessageAsync(uid, cancellationToken);
+                var issue = ParseEmailToIssue(message, vendorId);
+                
+                if (issue != null)
+                {
+                    issues.Add(issue);
+                    
+                    // Mark as read and move to processed folder
+                    await client.Inbox.AddFlagsAsync(uid, MessageFlags.Seen, true, cancellationToken);
+                    
+                    // Try to move to "Processed" folder
+                    try
+                    {
+                        var processedFolder = await client.GetFolderAsync("Processed", cancellationToken);
+                        await client.Inbox.MoveToAsync(uid, processedFolder, cancellationToken);
+                    }
+                    catch
+                    {
+                        // If folder doesn't exist, just leave marked as read
+                        _logger.LogWarning("Could not move email to Processed folder for vendor {VendorId}", vendorId);
+                    }
+                }
             }
 
             await client.DisconnectAsync(true, cancellationToken);
+            
+            _logger.LogInformation("Polled {Count} issue emails for vendor {VendorId}", issues.Count, vendorId);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error polling email inbox for vendor {VendorId}", vendorId);
+            _logger.LogError(ex, "Failed to poll email inbox for vendor {VendorId}", vendorId);
         }
 
         return issues;
     }
 
-    private string CreateDiscrepancyEmailHtml(EmailDiscrepancyNotification notification)
+    private MimeMessage CreateDiscrepancyEmail(EmailDiscrepancyNotification notification, VendorConfiguration vendor)
     {
-        var html = $@"
-        <html>
-        <body>
-            <h2>File Validation Discrepancies Report</h2>
-            <p><strong>Vendor ID:</strong> {notification.VendorId}</p>
-            <p><strong>File ID:</strong> {notification.FileId}</p>
-            <p><strong>Correlation ID:</strong> {notification.CorrelationId}</p>
+        var message = new MimeMessage();
+        message.From.Add(new MailboxAddress("File Exchange System", vendor.EmailSettings.FromAddress));
+        
+        foreach (var recipient in vendor.EmailSettings.NotificationRecipients)
+        {
+            message.To.Add(new MailboxAddress("", recipient));
+        }
+
+        message.Subject = $"File Validation Discrepancies - {vendor.Name} - File {notification.FileId}";
+
+        var bodyBuilder = new BodyBuilder();
+        
+        // Create HTML body
+        var htmlBody = new StringBuilder();
+        htmlBody.AppendLine($"<h2>File Validation Discrepancies Report</h2>");
+        htmlBody.AppendLine($"<p><strong>Vendor:</strong> {vendor.Name}</p>");
+        htmlBody.AppendLine($"<p><strong>File ID:</strong> {notification.FileId}</p>");
+        htmlBody.AppendLine($"<p><strong>Correlation ID:</strong> {notification.CorrelationId}</p>");
+        htmlBody.AppendLine($"<p><strong>Number of Discrepancies:</strong> {notification.Discrepancies.Count}</p>");
+        htmlBody.AppendLine("<hr>");
+        
+        htmlBody.AppendLine("<table border='1' cellpadding='5' cellspacing='0'>");
+        htmlBody.AppendLine("<tr><th>Record ID</th><th>Field</th><th>Rule Type</th><th>Expected</th><th>Actual</th><th>Description</th></tr>");
+        
+        foreach (var discrepancy in notification.Discrepancies)
+        {
+            htmlBody.AppendLine($"<tr>");
+            htmlBody.AppendLine($"<td>{discrepancy.RecordId}</td>");
+            htmlBody.AppendLine($"<td>{discrepancy.FieldName}</td>");
+            htmlBody.AppendLine($"<td>{discrepancy.RuleType}</td>");
+            htmlBody.AppendLine($"<td>{discrepancy.ExpectedValue}</td>");
+            htmlBody.AppendLine($"<td>{discrepancy.ActualValue}</td>");
+            htmlBody.AppendLine($"<td>{discrepancy.Description}</td>");
+            htmlBody.AppendLine($"</tr>");
+        }
+        
+        htmlBody.AppendLine("</table>");
+
+        // Create plain text body
+        var textBody = new StringBuilder();
+        textBody.AppendLine("File Validation Discrepancies Report");
+        textBody.AppendLine("====================================");
+        textBody.AppendLine($"Vendor: {vendor.Name}");
+        textBody.AppendLine($"File ID: {notification.FileId}");
+        textBody.AppendLine($"Correlation ID: {notification.CorrelationId}");
+        textBody.AppendLine($"Number of Discrepancies: {notification.Discrepancies.Count}");
+        textBody.AppendLine();
+        
+        foreach (var discrepancy in notification.Discrepancies)
+        {
+            textBody.AppendLine($"Record: {discrepancy.RecordId}");
+            textBody.AppendLine($"Field: {discrepancy.FieldName}");
+            textBody.AppendLine($"Rule: {discrepancy.RuleType}");
+            textBody.AppendLine($"Expected: {discrepancy.ExpectedValue}");
+            textBody.AppendLine($"Actual: {discrepancy.ActualValue}");
+            textBody.AppendLine($"Description: {discrepancy.Description}");
+            textBody.AppendLine("---");
+        }
+
+        bodyBuilder.HtmlBody = htmlBody.ToString();
+        bodyBuilder.TextBody = textBody.ToString();
+
+        // Attach CSV report
+        var csvContent = CreateDiscrepancyCsv(notification);
+        var csvBytes = Encoding.UTF8.GetBytes(csvContent);
+        bodyBuilder.Attachments.Add($"discrepancies_{notification.FileId}.csv", csvBytes, ContentType.Parse("text/csv"));
+
+        message.Body = bodyBuilder.ToMessageBody();
+        return message;
+    }
+
+    private string CreateDiscrepancyCsv(EmailDiscrepancyNotification notification)
+    {
+        var csv = new StringBuilder();
+        csv.AppendLine("Record ID,Field Name,Rule Type,Expected Value,Actual Value,Description");
+        
+        foreach (var discrepancy in notification.Discrepancies)
+        {
+            csv.AppendLine($"\"{discrepancy.RecordId}\",\"{discrepancy.FieldName}\",\"{discrepancy.RuleType}\",\"{discrepancy.ExpectedValue}\",\"{discrepancy.ActualValue}\",\"{discrepancy.Description}\"");
+        }
+        
+        return csv.ToString();
+    }
+
+    private ThirdPartyIssueReportedMessage? ParseEmailToIssue(MimeMessage message, string vendorId)
+    {
+        try
+        {
+            var subject = message.Subject ?? "";
+            var body = message.GetTextBody(MimeKit.Text.TextFormat.Text) ?? message.GetTextBody(MimeKit.Text.TextFormat.Html) ?? "";
             
-            <h3>Discrepancies Found:</h3>
-            <table border='1' style='border-collapse: collapse;'>
-                <tr>
-                    <th>Record ID</th>
-                    <th>Field Name</th>
-                    <th>Expected</th>
-                    <th>Actual</th>
-                    <th>Rule Type</th>
-                    <th>Description</th>
-                </tr>";
-
-        foreach (var discrepancy in notification.Discrepancies)
+            // Try to extract file ID from subject or body
+            var fileId = ExtractFileIdFromEmailContent(subject, body);
+            
+            return new ThirdPartyIssueReportedMessage
+            {
+                VendorId = vendorId,
+                FileId = fileId ?? "unknown",
+                IssueDescription = body.Length > 1000 ? body.Substring(0, 1000) + "..." : body,
+                EmailSubject = subject,
+                ReceivedAt = DateTimeOffset.UtcNow.ToString("O"),
+                CorrelationId = Guid.NewGuid().ToString()
+            };
+        }
+        catch (Exception ex)
         {
-            html += $@"
-                <tr>
-                    <td>{discrepancy.RecordId}</td>
-                    <td>{discrepancy.FieldName}</td>
-                    <td>{discrepancy.ExpectedValue}</td>
-                    <td>{discrepancy.ActualValue}</td>
-                    <td>{discrepancy.RuleType}</td>
-                    <td>{discrepancy.Description}</td>
-                </tr>";
+            _logger.LogError(ex, "Failed to parse email to issue for vendor {VendorId}", vendorId);
+            return null;
+        }
+    }
+
+    private string? ExtractFileIdFromEmailContent(string subject, string body)
+    {
+        // Try common patterns for file ID extraction
+        var patterns = new[]
+        {
+            @"file[:\s]+([a-zA-Z0-9\-_]+)",
+            @"id[:\s]+([a-zA-Z0-9\-_]+)",
+            @"reference[:\s]+([a-zA-Z0-9\-_]+)"
+        };
+
+        var content = $"{subject} {body}";
+        
+        foreach (var pattern in patterns)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(content, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
         }
 
-        html += @"
-            </table>
-            <p>Please review and resolve these discrepancies.</p>
-        </body>
-        </html>";
-
-        return html;
+        return null;
     }
 
-    private string CreateDiscrepancyEmailText(EmailDiscrepancyNotification notification)
+    private async Task SendEmailAsync(MimeMessage message, CancellationToken cancellationToken)
     {
-        var text = $@"
-File Validation Discrepancies Report
-
-Vendor ID: {notification.VendorId}
-File ID: {notification.FileId}
-Correlation ID: {notification.CorrelationId}
-
-Discrepancies Found:
-";
-
-        foreach (var discrepancy in notification.Discrepancies)
+        using var client = new SmtpClient();
+        
+        // Use configuration from the first vendor for SMTP settings (should be global)
+        var smtpSettings = _vendorSettings.Vendors.FirstOrDefault()?.EmailSettings;
+        if (smtpSettings == null)
         {
-            text += $@"
-- Record ID: {discrepancy.RecordId}
-  Field: {discrepancy.FieldName}
-  Expected: {discrepancy.ExpectedValue}
-  Actual: {discrepancy.ActualValue}
-  Rule Type: {discrepancy.RuleType}
-  Description: {discrepancy.Description}
-";
+            throw new InvalidOperationException("No SMTP settings configured");
         }
 
-        text += "\nPlease review and resolve these discrepancies.";
-        return text;
-    }
-
-    private string ExtractFileIdFromSubject(string subject)
-    {
-        // Simple file ID extraction - would need more sophisticated parsing based on vendor email formats
-        var match = System.Text.RegularExpressions.Regex.Match(subject, @"File ID:\s*([A-Za-z0-9\-]+)");
-        return match.Success ? match.Groups[1].Value : "UNKNOWN";
-    }
-
-    private VendorSettings GetVendorConfig(string vendorId)
-    {
-        var vendorSection = _configuration.GetSection($"Vendors:{vendorId}");
-        return vendorSection.Get<VendorSettings>() ?? throw new InvalidOperationException($"Vendor configuration not found for {vendorId}");
+        await client.ConnectAsync(smtpSettings.SmtpHost, smtpSettings.SmtpPort, smtpSettings.UseStartTls, cancellationToken);
+        await client.AuthenticateAsync(smtpSettings.Username, smtpSettings.Password, cancellationToken);
+        await client.SendAsync(message, cancellationToken);
+        await client.DisconnectAsync(true, cancellationToken);
     }
 }

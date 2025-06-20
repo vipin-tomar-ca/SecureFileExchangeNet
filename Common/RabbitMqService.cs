@@ -1,4 +1,3 @@
-
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using System.Text;
@@ -8,86 +7,123 @@ namespace SecureFileExchange.Common;
 public interface IRabbitMqService
 {
     Task PublishAsync<T>(string queueName, T message, CancellationToken cancellationToken = default) where T : class;
-    Task<IConnection> GetConnectionAsync();
-    Task<IModel> GetChannelAsync();
+    Task<T?> ConsumeAsync<T>(string queueName, CancellationToken cancellationToken = default) where T : class;
+    void StartConsuming<T>(string queueName, Func<T, Task> handler) where T : class;
+    void StopConsuming();
 }
 
 public class RabbitMqService : IRabbitMqService, IDisposable
 {
     private readonly ILogger<RabbitMqService> _logger;
-    private readonly IMessageSerializer _messageSerializer;
-    private readonly IConfiguration _configuration;
+    private readonly IMessageSerializer _serializer;
     private IConnection? _connection;
     private IModel? _channel;
+    private readonly object _lock = new object();
 
-    public RabbitMqService(ILogger<RabbitMqService> logger, IMessageSerializer messageSerializer, IConfiguration configuration)
+    public RabbitMqService(ILogger<RabbitMqService> logger, IConfiguration configuration, IMessageSerializer serializer)
     {
         _logger = logger;
-        _messageSerializer = messageSerializer;
         _configuration = configuration;
+        _serializer = serializer;
     }
 
-    public async Task<IConnection> GetConnectionAsync()
+    private void EnsureConnection()
     {
-        if (_connection == null || !_connection.IsOpen)
+        lock (_lock)
         {
-            var factory = new ConnectionFactory()
+            if (_connection?.IsOpen == true) return;
+
+            var factory = new ConnectionFactory
             {
-                HostName = _configuration["RabbitMQ:Host"] ?? "localhost",
-                Port = int.Parse(_configuration["RabbitMQ:Port"] ?? "5672"),
-                UserName = _configuration["RabbitMQ:Username"] ?? "guest",
-                Password = _configuration["RabbitMQ:Password"] ?? "guest",
-                VirtualHost = _configuration["RabbitMQ:VirtualHost"] ?? "/",
+                HostName = _configuration.GetValue<string>("RabbitMQ:Host") ?? "localhost",
+                Port = _configuration.GetValue<int>("RabbitMQ:Port", 5672),
+                UserName = _configuration.GetValue<string>("RabbitMQ:Username") ?? "guest",
+                Password = _configuration.GetValue<string>("RabbitMQ:Password") ?? "guest",
+                VirtualHost = _configuration.GetValue<string>("RabbitMQ:VirtualHost") ?? "/",
                 Ssl = new SslOption
                 {
-                    Enabled = bool.Parse(_configuration["RabbitMQ:UseTls"] ?? "false")
+                    Enabled = _configuration.GetValue<bool>("RabbitMQ:UseSsl", false)
                 }
             };
 
-            _connection = await Task.Run(() => factory.CreateConnection());
+            _connection = factory.CreateConnection();
+            _channel = _connection.CreateModel();
         }
-
-        return _connection;
-    }
-
-    public async Task<IModel> GetChannelAsync()
-    {
-        if (_channel == null || _channel.IsClosed)
-        {
-            var connection = await GetConnectionAsync();
-            _channel = connection.CreateModel();
-        }
-
-        return _channel;
     }
 
     public async Task PublishAsync<T>(string queueName, T message, CancellationToken cancellationToken = default) where T : class
     {
+        EnsureConnection();
+
+        _channel!.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false, arguments: null);
+
+        var body = _serializer.Serialize(message);
+        var properties = _channel.CreateBasicProperties();
+        properties.Persistent = true;
+        properties.ContentType = _serializer.ContentType;
+
+        _channel.BasicPublish(exchange: "", routingKey: queueName, basicProperties: properties, body: body);
+
+        _logger.LogDebug("Published message to queue {QueueName}", queueName);
+    }
+
+    public async Task<T?> ConsumeAsync<T>(string queueName, CancellationToken cancellationToken = default) where T : class
+    {
+        EnsureConnection();
+
+        _channel!.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false, arguments: null);
+
+        var result = _channel.BasicGet(queueName, autoAck: false);
+        if (result == null) return null;
+
         try
         {
-            var channel = await GetChannelAsync();
-            
-            channel.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false);
-
-            var messageBytes = _messageSerializer.Serialize(message);
-            var properties = channel.CreateBasicProperties();
-            properties.Persistent = true;
-            properties.ContentType = _messageSerializer.ContentType;
-
-            channel.BasicPublish(exchange: "", routingKey: queueName, basicProperties: properties, body: messageBytes);
-
-            _logger.LogInformation("Published message to queue {QueueName}", queueName);
+            var message = _serializer.Deserialize<T>(result.Body.ToArray());
+            _channel.BasicAck(result.DeliveryTag, false);
+            return message;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error publishing message to queue {QueueName}", queueName);
-            throw;
+            _logger.LogError(ex, "Failed to deserialize message from queue {QueueName}", queueName);
+            _channel.BasicNack(result.DeliveryTag, false, false); // Send to DLQ
+            return null;
         }
+    }
+
+    public void StartConsuming<T>(string queueName, Func<T, Task> handler) where T : class
+    {
+        EnsureConnection();
+
+        _channel!.QueueDeclare(queue: queueName, durable: true, exclusive: false, autoDelete: false, arguments: null);
+
+        var consumer = new EventingBasicConsumer(_channel);
+        consumer.Received += async (model, ea) =>
+        {
+            try
+            {
+                var message = _serializer.Deserialize<T>(ea.Body.ToArray());
+                await handler(message);
+                _channel.BasicAck(ea.DeliveryTag, false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing message from queue {QueueName}", queueName);
+                _channel.BasicNack(ea.DeliveryTag, false, false);
+            }
+        };
+
+        _channel.BasicConsume(queue: queueName, autoAck: false, consumer: consumer);
+        _logger.LogInformation("Started consuming from queue {QueueName}", queueName);
+    }
+
+    public void StopConsuming()
+    {
+        _channel?.Close();
+        _connection?.Close();
     }
 
     public void Dispose()
     {
-        _channel?.Close();
-        _connection?.Close();
+        StopConsuming();
     }
 }

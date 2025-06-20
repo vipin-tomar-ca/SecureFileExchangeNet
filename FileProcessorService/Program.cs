@@ -2,8 +2,9 @@
 using FileProcessorService;
 using SecureFileExchange.Common;
 using SecureFileExchange.Services;
-using SecureFileExchange.Contracts;
+using SecureFileExchange.VendorConfig;
 using Serilog;
+using OpenTelemetry.Trace;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -16,16 +17,23 @@ Log.Logger = new LoggerConfiguration()
 
 builder.Services.AddSerilog();
 
+// Add OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddConsoleExporter());
+
+// Configure options
+builder.Services.Configure<VendorSettings>(builder.Configuration.GetSection("VendorSettings"));
+
 // Register services
 builder.Services.AddSingleton<IMessageSerializer, JsonMessageSerializer>();
 builder.Services.AddSingleton<IRabbitMqService, RabbitMqService>();
-builder.Services.AddScoped<IFileProcessorService, Services.FileProcessorService>();
+builder.Services.AddSingleton<IEncryptionService>(sp => 
+    new AesEncryptionService(builder.Configuration.GetValue<string>("Encryption:Key") ?? ""));
+builder.Services.AddScoped<IFileProcessorService, FileProcessorService>();
 
-// Add gRPC client
-builder.Services.AddGrpcClient<BusinessRulesService.BusinessRulesServiceClient>(options =>
-{
-    options.Address = new Uri("http://localhost:5001");
-});
+// Add health checks
+builder.Services.AddHealthChecks();
 
 builder.Services.AddHostedService<Worker>();
 

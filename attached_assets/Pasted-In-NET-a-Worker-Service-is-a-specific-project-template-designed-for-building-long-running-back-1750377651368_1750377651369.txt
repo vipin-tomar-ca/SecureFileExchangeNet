@@ -1,0 +1,120 @@
+In .NET, a **Worker Service** is a specific project template designed for building long-running background services. Here's a detailed breakdown:
+
+---
+
+### **Worker Service Characteristics**
+1. **Project Type**:  
+   - Console application that runs until explicitly stopped
+   - Built on `IHostedService`/`BackgroundService` (.NET Core+)
+   - Template: `dotnet new worker`
+
+2. **Primary Use Cases**:
+   - Background task processing (e.g., polling, queue consumption)
+   - Scheduled jobs (cron-like operations)
+   - Daemon processes (Windows Services/Linux systemd)
+
+3. **Key Components**:
+   ```csharp
+   public class Worker : BackgroundService
+   {
+       protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+       {
+           while (!stoppingToken.IsCancellationRequested)
+           {
+               // Core logic (e.g., poll SFTP, process messages)
+               await Task.Delay(1000, stoppingToken);
+           }
+       }
+   }
+   ```
+
+---
+
+### **Worker Services in This Project**
+All microservices handling background operations use the Worker Service template:
+
+| **Service**                | **Background Task**                              | **Implementation Notes**                     |
+|----------------------------|--------------------------------------------------|----------------------------------------------|
+| `SftpWorkerService`        | Polls SFTP servers for new files                 | Uses `SSH.NET` + configurable intervals      |
+| `FileProcessorService`     | Consumes RabbitMQ messages for file processing   | RabbitMQ client + exponential backoff        |
+| `EmailNotificationService` | Sends emails asynchronously                      | `MailKit` with TLS                           |
+| `IssueEmailMonitorService` | Monitors IMAP inbox for issue reports            | Scheduled polling + email parsing            |
+
+---
+
+### **Key Advantages for This Project**
+1. **Hosting Flexibility**:
+   - Run as: Windows Service, Linux daemon, Docker container, or console
+   - Managed lifetime via `IHost`
+
+2. **Built-in Features**:
+   ```csharp
+   Host.CreateDefaultBuilder(args)
+       .UseWindowsService() // Or .UseSystemd()
+       .ConfigureServices(services =>
+       {
+           services.AddHostedService<Worker>();
+           services.AddSingleton<ISftpClient, SecureSftpClient>(); // DI
+       });
+   ```
+   - Dependency Injection
+   - Configuration (`appsettings.json`)
+   - Logging (Serilog/ILogger)
+
+3. **Graceful Shutdown**:
+   - Responds to `CancellationToken` for safe termination
+
+---
+
+### **Worker vs. Web API/ASP.NET Core**
+| **Aspect**          | **Worker Service**                     | **Web API**                     |
+|----------------------|----------------------------------------|---------------------------------|
+| **Entry Point**      | `BackgroundService.ExecuteAsync`       | HTTP endpoints (Controllers)    |
+| **Communication**    | Internal (queues/timers)               | External (HTTP/gRPC)            |
+| **Lifespan**         | Persistent until stopped               | Request-scoped                 |
+| **Use Case**         | Background processing                  | External client interactions   |
+
+---
+
+### **When to Use Worker Services Here**
+- All components marked as "(.NET Worker)" in the architecture:
+  - File downloading (SFTP)
+  - Message queue processing
+  - Email sending/receiving
+  - Scheduled monitoring tasks
+
+*Exception*: `BusinessRulesService` is a **gRPC Service** (ASP.NET Core project) because it needs to expose network endpoints for validation requests.
+
+---
+
+### **Deployment Example (Docker)**
+```Dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY ["SftpWorkerService/SftpWorkerService.csproj", "."]
+RUN dotnet restore
+COPY . .
+RUN dotnet publish -c Release -o /app
+
+FROM mcr.microsoft.com/dotnet/runtime:8.0
+WORKDIR /app
+COPY --from=build /app .
+ENTRYPOINT ["dotnet", "SftpWorkerService.dll"]
+```
+
+---
+
+### **Key Dependencies for Workers**
+```xml
+<ItemGroup>
+  <!-- Core -->
+  <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.*" />
+  
+  <!-- Project-Specific -->
+  <PackageReference Include="RabbitMQ.Client" Version="6.5.*" />
+  <PackageReference Include="SSH.NET" Version="2020.0.2" />
+  <PackageReference Include="MailKit" Version="4.2.0" />
+</ItemGroup>
+```
+
+Worker Services provide the perfect foundation for the background processing required in this file exchange platform, offering robustness, scalability, and easy integration with .NET's ecosystem.
