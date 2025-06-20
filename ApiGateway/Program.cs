@@ -1,4 +1,3 @@
-
 using Serilog;
 using OpenTelemetry.Trace;
 using SecureFileExchange.Common;
@@ -29,6 +28,14 @@ builder.Services.AddOpenTelemetry()
 // Add health checks
 builder.Services.AddHealthChecks();
 
+// Configure Bamboo Infrastructure
+builder.Services.AddBambooVault(builder.Configuration);
+builder.Services.AddBambooHealthChecks();
+builder.Services.AddMutualTlsAuthentication(builder.Configuration);
+
+// Register audit logging
+builder.Services.AddSingleton<IAuditLogger, BambooAuditLogger>();
+
 // Register application services
 var serializerType = builder.Configuration["MessageSerializer:Type"];
 if (serializerType == "Protobuf")
@@ -42,7 +49,7 @@ else
 
 builder.Services.AddScoped<ISftpService, SftpService>();
 builder.Services.AddScoped<IFileProcessorService, FileProcessorService>();
-builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IEmailService, EmailService>;
 
 var app = builder.Build();
 

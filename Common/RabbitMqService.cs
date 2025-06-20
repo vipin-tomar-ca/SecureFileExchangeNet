@@ -1,6 +1,7 @@
 using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Configuration;
 
 namespace SecureFileExchange.Common;
 
@@ -19,6 +20,7 @@ public class RabbitMqService : IRabbitMqService, IDisposable
     private IConnection? _connection;
     private IModel? _channel;
     private readonly object _lock = new object();
+    private readonly IConfiguration _configuration;
 
     public RabbitMqService(ILogger<RabbitMqService> logger, IConfiguration configuration, IMessageSerializer serializer)
     {

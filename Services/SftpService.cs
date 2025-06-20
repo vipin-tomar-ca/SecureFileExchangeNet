@@ -1,4 +1,3 @@
-
 using System.Security.Cryptography;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging;
@@ -20,15 +19,18 @@ public class SftpService : ISftpService
     private readonly ILogger<SftpService> _logger;
     private readonly VendorSettings _vendorSettings;
     private readonly IRabbitMqService _rabbitMqService;
+    private readonly ISecretProvider _secretProvider;
 
     public SftpService(
         ILogger<SftpService> logger,
         IOptions<VendorSettings> vendorSettings,
-        IRabbitMqService rabbitMqService)
+        IRabbitMqService rabbitMqService,
+        ISecretProvider secretProvider)
     {
         _logger = logger;
         _vendorSettings = vendorSettings.Value;
         _rabbitMqService = rabbitMqService;
+        _secretProvider = secretProvider;
     }
 
     public async Task<List<FileReceivedMessage>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default)
@@ -44,7 +46,17 @@ public class SftpService : ISftpService
 
         try
         {
-            using var client = CreateSftpClient(vendor);
+            var sftpConfig = vendor.SftpSettings;
+            var authMethods = await GetAuthenticationMethodsAsync(sftpConfig, vendorId);
+
+            var connectionInfo = new ConnectionInfo(
+                vendor.SftpSettings.Host,
+                vendor.SftpSettings.Port,
+                vendor.SftpSettings.Username,
+                authMethods
+            );
+            using var client = new SftpClient(connectionInfo);
+
             client.Connect();
 
             var remoteFiles = client.ListDirectory(vendor.SftpSettings.RemotePath)
@@ -57,7 +69,7 @@ public class SftpService : ISftpService
                 {
                     var fileData = await DownloadFileAsync(vendorId, file.FullName, cancellationToken);
                     var fileHash = ComputeFileHash(fileData);
-                    
+
                     var localPath = Path.Combine(vendor.SftpSettings.LocalPath, file.Name);
                     await File.WriteAllBytesAsync(localPath, fileData, cancellationToken);
 
@@ -99,46 +111,68 @@ public class SftpService : ISftpService
             throw new ArgumentException($"Vendor {vendorId} not found");
         }
 
-        using var client = CreateSftpClient(vendor);
-        client.Connect();
+        var sftpConfig = vendor.SftpSettings;
+        var authMethods = await GetAuthenticationMethodsAsync(sftpConfig, vendorId);
 
-        using var stream = new MemoryStream();
-        client.DownloadFile(remoteFilePath, stream);
-        
-        client.Disconnect();
-        
-        return stream.ToArray();
-    }
-
-    private SftpClient CreateSftpClient(VendorConfiguration vendor)
-    {
         var connectionInfo = new ConnectionInfo(
             vendor.SftpSettings.Host,
             vendor.SftpSettings.Port,
             vendor.SftpSettings.Username,
-            CreateAuthenticationMethods(vendor.SftpSettings)
+            authMethods
         );
 
-        return new SftpClient(connectionInfo);
+        using var client = new SftpClient(connectionInfo);
+        client.Connect();
+
+        using var stream = new MemoryStream();
+        client.DownloadFile(remoteFilePath, stream);
+
+        client.Disconnect();
+
+        return stream.ToArray();
     }
 
-    private AuthenticationMethod[] CreateAuthenticationMethods(SftpConfiguration sftpConfig)
+
+    private async Task<AuthenticationMethod[]> GetAuthenticationMethodsAsync(SftpConfiguration sftpConfig, string vendorId)
     {
         var methods = new List<AuthenticationMethod>();
 
-        if (!string.IsNullOrEmpty(sftpConfig.PrivateKeyPath))
+        try
         {
-            var privateKeyFile = new PrivateKeyFile(sftpConfig.PrivateKeyPath, sftpConfig.PrivateKeyPassphrase);
-            methods.Add(new PrivateKeyAuthenticationMethod(sftpConfig.Username, privateKeyFile));
-        }
+            // Get SSH private key from Bamboo Vault
+            // Assuming _secretProvider.GetBinarySecretAsync returns the private key data
+            // and _secretProvider.GetSecretAsync returns the passphrase.
+            var privateKeyData = await _secretProvider.GetBinarySecretAsync($"sftp/{vendorId}/ssh-private-key");
+            var privateKeyPassphrase = await _secretProvider.GetSecretAsync($"sftp/{vendorId}/ssh-passphrase");
 
-        if (!string.IsNullOrEmpty(sftpConfig.Password))
+            using var keyStream = new MemoryStream(privateKeyData);
+            var privateKeyFile = new PrivateKeyFile(keyStream, privateKeyPassphrase);
+            methods.Add(new PrivateKeyAuthenticationMethod(sftpConfig.Username, privateKeyFile));
+
+            _logger.LogDebug("Using SSH key authentication for vendor {VendorId}", vendorId);
+        }
+        catch (Exception ex)
         {
-            methods.Add(new PasswordAuthenticationMethod(sftpConfig.Username, sftpConfig.Password));
+            _logger.LogWarning(ex, "SSH key authentication not available for vendor {VendorId}, trying password", vendorId);
+
+            try
+            {
+                // Fallback to password authentication from Bamboo Vault
+                var password = await _secretProvider.GetSecretAsync($"sftp/{vendorId}/password");
+                methods.Add(new PasswordAuthenticationMethod(sftpConfig.Username, password));
+
+                _logger.LogDebug("Using password authentication for vendor {VendorId}", vendorId);
+            }
+            catch (Exception passwordEx)
+            {
+                _logger.LogError(passwordEx, "No valid authentication method found for vendor {VendorId}", vendorId);
+                throw new InvalidOperationException($"No authentication credentials found in Bamboo Vault for vendor {vendorId}");
+            }
         }
 
         return methods.ToArray();
     }
+
 
     private string ComputeFileHash(byte[] fileData)
     {
