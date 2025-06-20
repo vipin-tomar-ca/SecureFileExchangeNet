@@ -1,58 +1,24 @@
+using System.Diagnostics;
 
-using Serilog;
-using OpenTelemetry.Trace;
-using SecureFileExchange.Common;
-using SecureFileExchange.Services;
+Console.WriteLine("Starting Secure File Exchange Platform...");
 
-var builder = WebApplication.CreateBuilder(args);
-
-// Configure Serilog
-Log.Logger = new LoggerConfiguration()
-    .ReadFrom.Configuration(builder.Configuration)
-    .Enrich.FromLogContext()
-    .WriteTo.Console()
-    .CreateLogger();
-
-builder.Host.UseSerilog();
-
-// Add services to the container
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
-// Add OpenTelemetry
-builder.Services.AddOpenTelemetry()
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddConsoleExporter());
-
-// Add health checks
-builder.Services.AddHealthChecks();
-
-// Register application services
-builder.Services.AddSingleton<IMessageSerializer, JsonMessageSerializer>();
-builder.Services.AddScoped<ISftpService, SftpService>();
-builder.Services.AddScoped<IFileProcessorService, FileProcessorService>();
-builder.Services.AddScoped<IEmailService, EmailService>();
-
-// Add gRPC services
-builder.Services.AddGrpc();
-
-var app = builder.Build();
-
-// Configure the HTTP request pipeline
-if (app.Environment.IsDevelopment())
+// Start the API Gateway as the main entry point
+var apiGatewayPath = Path.Combine(Directory.GetCurrentDirectory(), "ApiGateway");
+var processInfo = new ProcessStartInfo("dotnet", "run")
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    WorkingDirectory = apiGatewayPath,
+    UseShellExecute = false,
+    RedirectStandardOutput = true,
+    RedirectStandardError = true
+};
+
+using var process = Process.Start(processInfo);
+if (process != null)
+{
+    Console.WriteLine($"API Gateway started with PID: {process.Id}");
+    await process.WaitForExitAsync();
 }
-
-app.UseHttpsRedirection();
-app.UseAuthorization();
-app.MapControllers();
-app.MapHealthChecks("/health");
-
-// Map gRPC services
-app.MapGrpcService<BusinessRulesGrpcService>();
-
-app.Run("http://0.0.0.0:5000");
+else
+{
+    Console.WriteLine("Failed to start API Gateway");
+}
