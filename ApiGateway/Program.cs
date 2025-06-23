@@ -1,6 +1,6 @@
-
 using Serilog;
 using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter; // Add this namespace for ConsoleExporter
 using SecureFileExchange.Common;
 using SecureFileExchange.Services;
 
@@ -24,7 +24,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddOpenTelemetry()
     .WithTracing(tracing => tracing
         .AddAspNetCoreInstrumentation()
-        .AddConsoleExporter());
+        .AddConsoleExporter()); // Ensure OpenTelemetry.Exporter is referenced
 
 // Add health checks
 builder.Services.AddHealthChecks();
@@ -59,3 +59,4 @@ app.MapControllers();
 app.MapHealthChecks("/health");
 
 app.Run("http://0.0.0.0:5000");
+//dotnet add package OpenTelemetry.Exporter.Console

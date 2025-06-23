@@ -6,15 +6,12 @@ namespace SecureFileExchange.Services;
 public interface ISftpService
 {
     Task<List<FileReceivedMessage>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default);
-    Task<bool> DownloadFileAsync(string vendorId, string remoteFilePath, string localFilePath, CancellationToken cancellationToken = default);
-    Task<string> CalculateFileHashAsync(string filePath);
-}
-namespace SecureFileExchange.Services;
+    //Task<bool> DownloadFileAsync(string vendorId, string remoteFilePath, string localFilePath, CancellationToken cancellationToken = default);
+    //Task<string> CalculateFileHashAsync(string filePath);
 
-public interface ISftpService
-{
-    Task<List<FileInfo>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default);
+    //Task<List<FileInfo>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default);
     Task<byte[]> DownloadFileAsync(string vendorId, string filePath, CancellationToken cancellationToken = default);
+
 }
 
 public class FileInfo

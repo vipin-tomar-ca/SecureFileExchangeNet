@@ -9,11 +9,11 @@ using SecureFileExchange.Common;
 
 namespace SecureFileExchange.Services;
 
-public interface ISftpService
-{
-    Task<List<FileReceivedMessage>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default);
-    Task<byte[]> DownloadFileAsync(string vendorId, string remoteFilePath, CancellationToken cancellationToken = default);
-}
+//public interface ISftpService
+//{
+//    Task<List<FileReceivedMessage>> PollForFilesAsync(string vendorId, CancellationToken cancellationToken = default);
+//    Task<byte[]> DownloadFileAsync(string vendorId, string remoteFilePath, CancellationToken cancellationToken = default);
+//}
 
 public class SftpService : ISftpService
 {
@@ -146,4 +146,5 @@ public class SftpService : ISftpService
         var hashBytes = sha256.ComputeHash(fileData);
         return Convert.ToHexString(hashBytes);
     }
+
 }

@@ -8,6 +8,7 @@ using SecureFileExchange.VendorConfig;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using MailKit;
 
 namespace SecureFileExchange.Services;
 

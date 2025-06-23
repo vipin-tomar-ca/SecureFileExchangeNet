@@ -5,6 +5,7 @@ using SecureFileExchange.VendorConfig;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging;
 using Moq;
+using SecureFileExchange.Common;
 
 namespace Tests;
 
@@ -13,8 +14,9 @@ public class SftpServiceTests
     [Fact]
     public async Task PollForFilesAsync_ShouldReturnEmptyList_WhenNoFiles()
     {
-        // Arrange
+        // Arrange  
         var mockLogger = new Mock<ILogger<SftpService>>();
+        var mockRabbitMqService = new Mock<IRabbitMqService>();
         var vendorSettings = new VendorSettings
         {
             Vendors = new List<VendorConfiguration>
@@ -23,10 +25,10 @@ public class SftpServiceTests
             }
         };
         var options = Options.Create(vendorSettings);
-        var sftpService = new SftpService(mockLogger.Object, options);
+        var sftpService = new SftpService(mockLogger.Object, options, mockRabbitMqService.Object);
 
-        // Act & Assert - This would need proper SFTP mocking
-        // For now, just verify the service can be instantiated
+        // Act & Assert - This would need proper SFTP mocking  
+        // For now, just verify the service can be instantiated  
         Assert.NotNull(sftpService);
     }
 }

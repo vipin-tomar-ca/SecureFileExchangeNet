@@ -1,8 +1,11 @@
-
-using SecureFileExchange.Services;
-using SecureFileExchange.VendorConfig;
+using OpenTelemetry.Metrics; // Add this using directive for OpenTelemetry Metrics
+using OpenTelemetry.Trace; // Ensure this using directive is present for OpenTelemetry Tracing
+using OpenTelemetry.Resources;
 using Serilog;
-using OpenTelemetry.Trace;
+using SecureFileExchange.VendorConfig; // Ensure this using directive is present for ResourceBuilder
+using OpenTelemetry.Instrumentation.AspNetCore;
+using SecureFileExchange.Services;
+//using OpenTelemetry.Instrumentation.GrpcNetClient;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,12 +27,46 @@ builder.Services.AddGrpc(options =>
     options.EnableDetailedErrors = true;
 });
 
-// Add OpenTelemetry
+// Add OpenTelemetry Tracing and Metrics
+builder.Services.AddOpenTelemetry();
+// Add this using directive for AspNetCore instrumentation
+
+// Add OpenTelemetry Tracing and Metrics
+builder.Services.AddOpenTelemetry();
+ // Add this using directive for GrpcClient instrumentation
+
+// Update the OpenTelemetry Tracing configuration
 builder.Services.AddOpenTelemetry()
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddGrpcClientInstrumentation()
-        .AddConsoleExporter());
+    .WithTracing(tracingBuilder =>
+    {
+        tracingBuilder
+            .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("BusinessRulesService"))
+            .AddAspNetCoreInstrumentation() // Ensure the required package is installed
+            //.AddGrpcClientInstrumentation() // Ensure the required package is installed
+            .AddConsoleExporter();
+    })
+    .WithMetrics(metricsBuilder =>
+    {
+        metricsBuilder
+            .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("BusinessRulesService"))
+            .AddAspNetCoreInstrumentation()
+            .AddConsoleExporter();
+    })//;dotnet add package OpenTelemetry.Instrumentation.GrpcNetClient
+    .WithMetrics(metricsBuilder =>
+    {
+        metricsBuilder
+            .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("BusinessRulesService"))
+            .AddAspNetCoreInstrumentation()
+            .AddConsoleExporter();
+    }) //dotnet add package OpenTelemetry.Instrumentation.AspNetCore
+
+    .WithMetrics(metricsBuilder =>
+    {
+        metricsBuilder
+            .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("BusinessRulesService"))
+            .AddAspNetCoreInstrumentation()
+            .AddConsoleExporter();
+    });
 
 // Add health checks
 builder.Services.AddHealthChecks();

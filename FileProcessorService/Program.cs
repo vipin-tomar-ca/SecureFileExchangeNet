@@ -1,5 +1,4 @@
 
-using FileProcessorService;
 using SecureFileExchange.Common;
 using SecureFileExchange.Services;
 using SecureFileExchange.VendorConfig;

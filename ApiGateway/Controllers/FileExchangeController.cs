@@ -32,7 +32,7 @@ public class FileExchangeController : ControllerBase
     {
         try
         {
-            await _sftpService.PollSftpServerAsync(vendorId);
+            var fileRec= await _sftpService.PollForFilesAsync(vendorId,new CancellationToken());
             return Ok(new { Message = $"SFTP poll triggered for vendor {vendorId}" });
         }
         catch (Exception ex)

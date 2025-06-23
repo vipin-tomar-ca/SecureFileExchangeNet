@@ -1,4 +1,3 @@
-
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -7,7 +6,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ApiGateway", "ApiGateway\Ap
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SftpWorkerService", "SftpWorkerService\SftpWorkerService.csproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileProcessorService", "FileProcessorService\FileProcessorService.csproj", "{B2C3D4E5-F678-90AB-CDEF-123456789012}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FileProcessor", "FileProcessorService\FileProcessor.csproj", "{B2C3D4E5-F678-90AB-CDEF-123456789012}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BusinessRulesService", "BusinessRulesService\BusinessRulesService.csproj", "{C3D4E5F6-7890-ABCD-EF12-34567890ABCD}"
 EndProject
@@ -75,5 +74,8 @@ Global
 		{45678901-2CDE-F123-4567-890ABCDEF123}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{45678901-2CDE-F123-4567-890ABCDEF123}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{45678901-2CDE-F123-4567-890ABCDEF123}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
 	EndGlobalSection
 EndGlobal

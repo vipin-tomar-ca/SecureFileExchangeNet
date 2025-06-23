@@ -3,6 +3,7 @@ using EmailNotificationService;
 using SecureFileExchange.Common;
 using SecureFileExchange.Services;
 using Serilog;
+using Serilog.Extensions.Logging;
 
 var builder = Host.CreateApplicationBuilder(args);
 

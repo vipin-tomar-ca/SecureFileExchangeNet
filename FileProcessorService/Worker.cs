@@ -5,8 +5,6 @@ using SecureFileExchange.Services;
 using SecureFileExchange.Contracts;
 using System.Text;
 
-namespace FileProcessorService;
-
 public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;

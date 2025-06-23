@@ -5,6 +5,7 @@ using SecureFileExchange.Services;
 using SecureFileExchange.VendorConfig;
 using Serilog;
 using OpenTelemetry.Trace;
+using OpenTelemetry.Resources;
 
 var builder = Host.CreateApplicationBuilder(args);
 
