@@ -1,4 +1,3 @@
-
 using System.Text.Json;
 using System.Text;
 using System.Xml;
@@ -39,7 +38,7 @@ public class FileProcessorService : IFileProcessorService
             // Parse the file
             var records = await ParseFileAsync(message.FilePath, message.VendorId, cancellationToken);
 
-            // Validate records using gRPC service
+            // Validate records using Business Rules gRPC service
             var validationResult = await ValidateRecordsAsync(message.VendorId, records, message.CorrelationId, cancellationToken);
 
             if (!validationResult.IsValid)
@@ -86,13 +85,58 @@ public class FileProcessorService : IFileProcessorService
             fileContent = await _encryptionService.DecryptAsync(fileContent);
         }
 
-        return fileExtension switch
+        List<FileRecord> records = fileExtension switch
         {
             ".csv" => ParseCsvFile(fileContent, vendor),
             ".json" => ParseJsonFile(fileContent, vendor),
             ".xml" => ParseXmlFile(fileContent, vendor),
+            ".txt" => ParseTextFile(fileContent, vendor),
             _ => throw new NotSupportedException($"File format {fileExtension} is not supported")
         };
+
+        // Validate records and log/report errors
+        var errors = ValidateFileRecords(records);
+        if (errors.Any())
+        {
+            foreach (var error in errors)
+            {
+                _logger.LogWarning(error);
+            }
+            // Optionally, throw or handle errors as needed
+            // throw new InvalidDataException("Validation failed for one or more records.");
+        }
+
+        // Optionally, filter out invalid records
+        // records = records.Where(r => !errors.Any(e => e.Contains(r.RecordId))).ToList();
+
+        return records;
+    }
+
+    /// <summary>
+    /// Example validation: checks for required fields, data types, and business rules.
+    /// </summary>
+    private List<string> ValidateFileRecords(List<FileRecord> records)
+    {
+        var errors = new List<string>();
+        foreach (var record in records)
+        {
+            // Schema: Required field "Id"
+            if (!record.Fields.TryGetValue("Id", out var id) || string.IsNullOrWhiteSpace(id))
+                errors.Add($"Record {record.RecordId}: Missing or empty 'Id'.");
+
+            // Data type: "Amount" should be a decimal
+            if (record.Fields.TryGetValue("Amount", out var amountStr) && !decimal.TryParse(amountStr, out _))
+                errors.Add($"Record {record.RecordId}: Invalid decimal in 'Amount'.");
+
+            // Business rule: "Status" must be "Active" or "Inactive"
+            if (record.Fields.TryGetValue("Status", out var status) &&
+                !string.IsNullOrWhiteSpace(status) &&
+                status != "Active" && status != "Inactive")
+                errors.Add($"Record {record.RecordId}: Invalid 'Status' value '{status}'.");
+
+            // Add more rules as needed...
+        }
+        return errors;
     }
 
     private List<FileRecord> ParseCsvFile(string content, VendorConfiguration vendor)
@@ -186,6 +230,39 @@ public class FileProcessorService : IFileProcessorService
                 RecordId = $"record_{recordIndex++}",
                 Fields = { fields }
             });
+        }
+
+        return records;
+    }
+
+    private List<FileRecord> ParseTextFile(string content, VendorConfiguration vendor)
+    {
+        var records = new List<FileRecord>();
+        var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        int recordIndex = 0;
+        foreach (var line in lines)
+        {
+            // Example: Assume each line is a key-value pair separated by ':' (customize as needed)
+            var fields = new Dictionary<string, string>();
+            var parts = line.Split(';', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var part in parts)
+            {
+                var kv = part.Split(':', 2);
+                if (kv.Length == 2)
+                {
+                    fields[kv[0].Trim()] = kv[1].Trim();
+                }
+            }
+
+            if (fields.Count > 0)
+            {
+                records.Add(new FileRecord
+                {
+                    RecordId = $"record_{recordIndex++}",
+                    Fields = { fields }
+                });
+            }
         }
 
         return records;
