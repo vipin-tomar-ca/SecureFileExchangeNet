@@ -1,0 +1,108 @@
+# Bamboo CD Pipeline Configuration
+version: 2
+
+# CD Pipeline for deploying the application
+cd-pipeline:
+  name: CD Pipeline
+  stages:
+    - Deploy to Staging
+    - Approval Stage
+    - Deploy to Production
+
+  artifacts:
+    - name: Build Artifacts
+      pattern: "**/publish/**/*"
+      required: true
+      shared: true
+
+  Deploy to Staging:
+    jobs:
+      - deploy-staging-job
+
+  Approval Stage:
+    jobs:
+      - manual-approval-job
+
+  Deploy to Production:
+    jobs:
+      - deploy-production-job
+
+# Job Definitions
+deploy-staging-job:
+  name: Deploy to Staging
+  tasks:
+    - script:
+        - echo "Stopping IIS site..."
+        - Stop-WebSite -Name "YourStagingSiteName"
+
+    - script:
+        - echo "Deploying to staging..."
+        - Copy-Item -Path "./publish/*" -Destination "C:\\inetpub\\YourStagingSite" -Recurse -Force
+
+    - script:
+        - echo "Starting IIS site..."
+        - Start-WebSite -Name "YourStagingSiteName"
+
+    - script:
+        - echo "Running smoke tests..."
+        # Add your smoke test commands here
+        - Invoke-WebRequest -Uri "https://your-staging-site.com/health" -UseBasicParsing
+
+  requirements:
+    - windows
+
+  artifacts:
+    - name: Deployment Logs
+      location: "."
+      pattern: "deploy-*.log"
+
+manual-approval-job:
+  name: Manual Approval
+  tasks:
+    - script:
+        - echo "Waiting for manual approval..."
+
+  final: true
+  requirements:
+    - windows
+
+deploy-production-job:
+  name: Deploy to Production
+  tasks:
+    - script:
+        - echo "Stopping production IIS site..."
+        - Stop-WebSite -Name "YourProductionSiteName"
+
+    - script:
+        - echo "Backing up current production..."
+        - $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+        - Compress-Archive -Path "C:\\inetpub\\YourProductionSite\\*" -DestinationPath "C:\\backups\\production_$timestamp.zip"
+
+    - script:
+        - echo "Deploying to production..."
+        - Copy-Item -Path "./publish/*" -Destination "C:\\inetpub\\YourProductionSite" -Recurse -Force
+
+    - script:
+        - echo "Starting production IIS site..."
+        - Start-WebSite -Name "YourProductionSiteName"
+
+    - script:
+        - echo "Running smoke tests..."
+        # Add your smoke test commands here
+        - Invoke-WebRequest -Uri "https://your-production-site.com/health" -UseBasicParsing
+
+  requirements:
+    - windows
+
+  artifacts:
+    - name: Deployment Logs
+      location: "."
+      pattern: "deploy-prod-*.log"
+
+# Environment variables that would be set in Bamboo
+# These are just examples - you should set these in your Bamboo variables
+environment:
+  STAGING_PATH: "C:\\inetpub\\YourStagingSite"
+  PRODUCTION_PATH: "C:\\inetpub\\YourProductionSite"
+  STAGING_URL: "https://your-staging-site.com"
+  PRODUCTION_URL: "https://your-production-site.com"

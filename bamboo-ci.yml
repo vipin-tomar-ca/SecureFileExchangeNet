@@ -1,0 +1,77 @@
+# Bamboo CI Pipeline Configuration
+version: 2
+
+# CI Pipeline for building and testing the application
+ci-pipeline:
+  name: CI Pipeline
+  stages:
+    - Build Stage
+    - Test Stage
+
+  artifacts:
+    - name: Build Output
+      pattern: "**/publish/**/*"
+      required: true
+      shared: false
+
+  Build Stage:
+    jobs:
+      - build-job
+
+  Test Stage:
+    jobs:
+      - test-job
+
+# Job Definitions
+build-job:
+  name: Build Job
+  tasks:
+    - script:
+        - echo "Restoring NuGet packages..."
+        - dotnet restore
+        
+    - script:
+        - echo "Building solution..."
+        - dotnet build --configuration Release --no-restore
+
+    - script:
+        - echo "Publishing application..."
+        - dotnet publish -c Release -o ./publish --no-build --no-restore
+
+    - artifacts:
+        - name: Build Output
+          location: ./publish
+          pattern: "**/*"
+
+  requirements:
+    - windows
+
+  artifacts:
+    - name: Build Output
+      location: ./publish
+      pattern: "**/*"
+
+test-job:
+  name: Test Job
+  tasks:
+    - script:
+        - echo "Running unit tests..."
+        - dotnet test --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+    - test-parser:
+        type: mstest
+        directory: "**/TestResults"
+        result-mask: "*.trx"
+
+  requirements:
+    - windows
+
+  dependencies:
+    - build-job
+
+  artifacts:
+    - name: Test Results
+      location: "**/TestResults"
+      pattern: "*.trx"
+      required: true
+      shared: false
