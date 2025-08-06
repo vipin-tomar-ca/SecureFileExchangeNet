@@ -1,77 +1,100 @@
-# Bamboo CI Pipeline Configuration
+
 version: 2
 
-# CI Pipeline for building and testing the application
-ci-pipeline:
-  name: CI Pipeline
-  stages:
-    - Build Stage
-    - Test Stage
+# Define variables that can be overridden in Bamboo
+variables:
+  - &dotnet-version 8.0
+  - &nuget-feed: ${bamboo.nuget.feed}
+  - &nuget-username: ${bamboo.nuget.username}
+  - &nuget-password: ${bamboo.nuget.password}
+  - &build-configuration: Release
+  - &test-runner: trx
+  - &test-results: test-results.trx
 
-  artifacts:
-    - name: Build Output
-      pattern: "**/publish/**/*"
-      required: true
-      shared: false
+plan:
+  project-key: DOTNET
+  key: BUILD
+  name: .NET Project Build
 
-  Build Stage:
-    jobs:
-      - build-job
+stages:
+  - Build:
+      jobs:
+        - Build Job
 
-  Test Stage:
-    jobs:
-      - test-job
-
-# Job Definitions
-build-job:
-  name: Build Job
+Build Job:
   tasks:
+    - checkout:
+        repository: default
+        path: .
+        force-clean-build: true
+    
+    # Configure NuGet credentials if private feed is used
     - script:
-        - echo "Restoring NuGet packages..."
-        - dotnet restore
-        
+        interpreter: SHELL
+        scripts:
+          - |
+            if [ -n "${bamboo.nuget.feed}" ]; then
+              dotnet nuget add source ${bamboo.nuget.feed} \
+                --name private-feed \
+                --username ${bamboo.nuget.username} \
+                --password ${bamboo.nuget.password} \
+                --store-password-in-clear-text
+            fi
+    
+    # Build and test
     - script:
-        - echo "Building solution..."
-        - dotnet build --configuration Release --no-restore
-
+        interpreter: SHELL
+        scripts:
+          - dotnet restore --interactive
+          - dotnet build --configuration ${bamboo.build.configuration} --no-restore
+          - dotnet test --configuration ${bamboo.build.configuration} --no-build --no-restore --logger "${bamboo.test.runner};LogFileName=${bamboo.test.results}"
+    
+    # Publish artifacts
     - script:
-        - echo "Publishing application..."
-        - dotnet publish -c Release -o ./publish --no-build --no-restore
-
-    - artifacts:
-        - name: Build Output
-          location: ./publish
-          pattern: "**/*"
-
-  requirements:
-    - windows
-
-  artifacts:
-    - name: Build Output
-      location: ./publish
-      pattern: "**/*"
-
-test-job:
-  name: Test Job
-  tasks:
-    - script:
-        - echo "Running unit tests..."
-        - dotnet test --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
-
+        interpreter: SHELL
+        scripts:
+          - dotnet publish --configuration ${bamboo.build.configuration} --output ./publish
+    
+    # Publish test results
     - test-parser:
-        type: mstest
+        type: ${bamboo.test.runner}
         directory: "**/TestResults"
         result-mask: "*.trx"
+    
+    # Create build artifacts
+    - artifact:
+        name: Build Output
+        location: ./publish
+        pattern: "**/*"
+        shared: true
+        required: true
 
-  requirements:
-    - windows
+requirements:
+  - os: windows
+  - dotnet: ${bamboo.dotnet.version}
 
-  dependencies:
-    - build-job
+# Environment variables available to all jobs
+environment:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: true
+  NUGET_XMLDOC_MODE: skip
 
-  artifacts:
-    - name: Test Results
-      location: "**/TestResults"
-      pattern: "*.trx"
-      required: true
-      shared: false
+triggers:
+  - repository-polling:
+      cron: "0 0/15 * * * ?"  # Check every 15 minutes
+
+notifications:
+  - email:
+      recipients: ${bamboo.notification.email}
+      on:
+        - failed
+        - error
+        - success
+
+# Artifact sharing between builds
+artifact-definitions:
+  - name: Build Output
+    location: ./publish
+    pattern: "**/*"
+    shared: true
+    required: true

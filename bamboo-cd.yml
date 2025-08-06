@@ -1,108 +1,249 @@
-# Bamboo CD Pipeline Configuration
+
 version: 2
 
-# CD Pipeline for deploying the application
-cd-pipeline:
-  name: CD Pipeline
-  stages:
-    - Deploy to Staging
-    - Approval Stage
-    - Deploy to Production
+# Define variables that can be overridden in Bamboo
+variables:
+  - &iis-app-pool: ${bamboo.iis.app.pool}
+  - &iis-site-name: ${bamboo.iis.site.name}
+  - &iis-site-path: ${bamboo.iis.site.path}
+  - &windows-service-name: ${bamboo.windows.service.name}
+  - &windows-service-path: ${bamboo.windows.service.path}
+  - &windows-service-display-name: ${bamboo.windows.service.display.name}
+  - &backup-path: ${bamboo.backup.path}
+  - &max-backups: ${bamboo.max.backups}
+  - &notification-emails: ${bamboo.notification.emails}
 
-  artifacts:
-    - name: Build Artifacts
-      pattern: "**/publish/**/*"
-      required: true
-      shared: true
+plan:
+  project-key: DOTNET
+  key: DEPLOY
+  name: .NET Project Deploy to IIS and Windows Service
 
-  Deploy to Staging:
-    jobs:
-      - deploy-staging-job
+stages:
+  - Pre-Deployment:
+      jobs:
+        - Pre-Deploy Checks
+  - Deploy:
+      jobs:
+        - Deploy Application
+  - Post-Deployment:
+      jobs:
+        - Post-Deploy Verification
 
-  Approval Stage:
-    jobs:
-      - manual-approval-job
-
-  Deploy to Production:
-    jobs:
-      - deploy-production-job
-
-# Job Definitions
-deploy-staging-job:
-  name: Deploy to Staging
+Pre-Deploy Checks:
   tasks:
     - script:
-        - echo "Stopping IIS site..."
-        - Stop-WebSite -Name "YourStagingSiteName"
+        interpreter: POWERSHELL
+        scripts:
+          - |
+            # Verify required directories exist
+            if (-not (Test-Path "${bamboo.iis.site.path}")) {
+                New-Item -ItemType Directory -Path "${bamboo.iis.site.path}" -Force
+            }
+            
+            if (-not (Test-Path "${bamboo.windows.service.path}")) {
+                New-Item -ItemType Directory -Path "${bamboo.windows.service.path}" -Force
+            }
+            
+            # Create backup directory if it doesn't exist
+            if (-not (Test-Path "${bamboo.backup.path}")) {
+                New-Item -ItemType Directory -Path "${bamboo.backup.path}" -Force
+            }
+            
+            # Clean up old backups (keep last ${bamboo.max.backups} backups)
+            Get-ChildItem -Path "${bamboo.backup.path}" -Filter "backup_*" | 
+                Sort-Object CreationTime -Descending | 
+                Select-Object -Skip ${bamboo.max.backups} | 
+                Remove-Item -Recurse -Force
 
+Deploy Application:
+  tasks:
+    - artifact:
+        name: Build Output
+        source-plan: DOTNET-BUILD
+    
     - script:
-        - echo "Deploying to staging..."
-        - Copy-Item -Path "./publish/*" -Destination "C:\\inetpub\\YourStagingSite" -Recurse -Force
-
+        interpreter: POWERSHELL
+        scripts:
+          - |
+            # Create a timestamp for the backup
+            $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+            $backupFolder = Join-Path -Path "${bamboo.backup.path}" -ChildPath "backup_$timestamp"
+            
+            try {
+                # Backup existing application
+                Write-Output "Creating backup in $backupFolder"
+                if (Test-Path "${bamboo.iis.site.path}") {
+                    Copy-Item -Path "${bamboo.iis.site.path}\*" -Destination $backupFolder -Recurse -Force
+                }
+                
+                # Stop IIS application pool and site
+                Write-Output "Stopping IIS application pool and site..."
+                Stop-WebAppPool -Name "${bamboo.iis.app.pool}" -ErrorAction SilentlyContinue
+                Stop-WebSite -Name "${bamboo.iis.site.name}" -ErrorAction SilentlyContinue
+                
+                # Deploy to IIS
+                Write-Output "Deploying to IIS..."
+                Remove-Item -Path "${bamboo.iis.site.path}\*" -Recurse -Force -ErrorAction SilentlyContinue
+                Copy-Item -Path "./publish/*" -Destination "${bamboo.iis.site.path}" -Recurse -Force
+                
+                # Handle Windows Service
+                $service = Get-Service -Name "${bamboo.windows.service.name}" -ErrorAction SilentlyContinue
+                if ($service) { 
+                    Write-Output "Stopping and removing existing Windows service..."
+                    Stop-Service -Name "${bamboo.windows.service.name}" -Force -ErrorAction SilentlyContinue
+                    Start-Sleep -Seconds 5
+                    sc.exe delete "${bamboo.windows.service.name}" | Out-Null
+                }
+                
+                # Deploy Windows service
+                Write-Output "Deploying Windows service..."
+                if (-not (Test-Path "${bamboo.windows.service.path}")) {
+                    New-Item -ItemType Directory -Path "${bamboo.windows.service.path}" -Force
+                }
+                
+                Copy-Item -Path "./publish/*" -Destination "${bamboo.windows.service.path}" -Recurse -Force
+                
+                # Create new service if it doesn't exist
+                if (-not $service) {
+                    $serviceExe = Join-Path -Path "${bamboo.windows.service.path}" -ChildPath "${bamboo.windows.service.name}.exe"
+                    New-Service -Name "${bamboo.windows.service.name}" `
+                               -BinaryPathName $serviceExe `
+                               -DisplayName "${bamboo.windows.service.display.name}" `
+                               -StartupType Automatic `
+                               -ErrorAction Stop
+                }
+                
+                # Start services
+                Write-Output "Starting services..."
+                Start-WebAppPool -Name "${bamboo.iis.app.pool}"
+                Start-WebSite -Name "${bamboo.iis.site.name}"
+                Start-Service -Name "${bamboo.windows.service.name}"
+                
+                Write-Output "Deployment completed successfully!"
+            }
+            catch {
+                # Attempt to rollback on error
+                Write-Error "Deployment failed: $_"
+                Write-Output "Attempting rollback..."
+                
+                if (Test-Path $backupFolder) {
+                    # Restore from backup
+                    Remove-Item -Path "${bamboo.iis.site.path}\*" -Recurse -Force -ErrorAction SilentlyContinue
+                    Copy-Item -Path "$backupFolder\*" -Destination "${bamboo.iis.site.path}" -Recurse -Force
+                    
+                    # Restart services with previous version
+                    Start-WebAppPool -Name "${bamboo.iis.app.pool}"
+                    Start-WebSite -Name "${bamboo.iis.site.name}"
+                    Start-Service -Name "${bamboo.windows.service.name}" -ErrorAction SilentlyContinue
+                }
+                
+                throw "Deployment failed and rollback attempted. Please check the logs for details."
+            }
+    
     - script:
-        - echo "Starting IIS site..."
-        - Start-WebSite -Name "YourStagingSiteName"
+        interpreter: POWERSHELL
+        scripts:
+          - |
+            # Verify services are running
+            $iisStatus = (Get-Website -Name "${bamboo.iis.site.name}").State
+            $serviceStatus = (Get-Service -Name "${bamboo.windows.service.name}").Status
+            
+            if ($iisStatus -ne "Started") {
+                Write-Error "IIS site is not running. Current status: $iisStatus"
+                exit 1
+            }
+            
+            if ($serviceStatus -ne "Running") {
+                Write-Error "Windows service is not running. Current status: $serviceStatus"
+                exit 1
+            }
+            
+            # Simple health check
+            try {
+                $healthCheck = Invoke-WebRequest -Uri "http://localhost/health" -UseBasicParsing -ErrorAction Stop
+                if ($healthCheck.StatusCode -ne 200) {
+                    throw "Health check failed with status code: $($healthCheck.StatusCode)"
+                }
+                Write-Output "Health check passed successfully!"
+            }
+            catch {
+                Write-Error "Health check failed: $_"
+                exit 1
+            }
 
-    - script:
-        - echo "Running smoke tests..."
-        # Add your smoke test commands here
-        - Invoke-WebRequest -Uri "https://your-staging-site.com/health" -UseBasicParsing
-
-  requirements:
-    - windows
-
-  artifacts:
-    - name: Deployment Logs
-      location: "."
-      pattern: "deploy-*.log"
-
-manual-approval-job:
-  name: Manual Approval
+Post-Deploy Verification:
   tasks:
     - script:
-        - echo "Waiting for manual approval..."
+        interpreter: POWERSHELL
+        scripts:
+          - |
+            # Additional verification steps can be added here
+            Write-Output "Post-deployment verification in progress..."
+            
+            # Verify application is accessible
+            try {
+                $response = Invoke-WebRequest -Uri "http://localhost" -UseBasicParsing -ErrorAction Stop
+                Write-Output "Application is responding with status code: $($response.StatusCode)"
+                
+                # Add any custom verification logic here
+                if ($response.Content -match "error|exception|failed") {
+                    Write-Warning "Potential issues detected in the response content"
+                    exit 1
+                }
+            }
+            catch {
+                Write-Error "Failed to verify application: $_"
+                exit 1
+            }
+            
+            Write-Output "Post-deployment verification completed successfully!"
 
-  final: true
-  requirements:
-    - windows
+requirements:
+  - os: windows
+  - powershell: 7
+  - dotnet: ${bamboo.dotnet.version}
 
-deploy-production-job:
-  name: Deploy to Production
-  tasks:
-    - script:
-        - echo "Stopping production IIS site..."
-        - Stop-WebSite -Name "YourProductionSiteName"
-
-    - script:
-        - echo "Backing up current production..."
-        - $timestamp = Get-Date -Format "yyyyMMddHHmmss"
-        - Compress-Archive -Path "C:\\inetpub\\YourProductionSite\\*" -DestinationPath "C:\\backups\\production_$timestamp.zip"
-
-    - script:
-        - echo "Deploying to production..."
-        - Copy-Item -Path "./publish/*" -Destination "C:\\inetpub\\YourProductionSite" -Recurse -Force
-
-    - script:
-        - echo "Starting production IIS site..."
-        - Start-WebSite -Name "YourProductionSiteName"
-
-    - script:
-        - echo "Running smoke tests..."
-        # Add your smoke test commands here
-        - Invoke-WebRequest -Uri "https://your-production-site.com/health" -UseBasicParsing
-
-  requirements:
-    - windows
-
-  artifacts:
-    - name: Deployment Logs
-      location: "."
-      pattern: "deploy-prod-*.log"
-
-# Environment variables that would be set in Bamboo
-# These are just examples - you should set these in your Bamboo variables
+# Environment variables
 environment:
-  STAGING_PATH: "C:\\inetpub\\YourStagingSite"
-  PRODUCTION_PATH: "C:\\inetpub\\YourProductionSite"
-  STAGING_URL: "https://your-staging-site.com"
-  PRODUCTION_URL: "https://your-production-site.com"
+  ASPNETCORE_ENVIRONMENT: Production
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+
+# Triggers
+triggers:
+  - manual
+
+# Notifications
+notifications:
+  - email:
+      recipients: ${bamboo.notification.emails}
+      on:
+        - failed
+        - error
+        - success
+
+# Dependencies
+dependencies:
+  - plan: DOTNET-BUILD
+    artifacts:
+      - name: Build Output
+        required: true
+
+# Deployment hooks
+hooks:
+  before-deploy:
+    - script:
+        interpreter: POWERSHELL
+        scripts:
+          - Write-Output "Starting deployment at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+  
+  after-deploy:
+    - script:
+        interpreter: POWERSHELL
+        scripts:
+          - Write-Output "Deployment completed at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+
+# Permissions required by the deployment agent
+permissions:
+  - iis:admin
+  - service:admin
+  - file-system:write
