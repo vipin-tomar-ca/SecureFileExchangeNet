@@ -1,0 +1,1014 @@
+Below is a step-by-step guide to using the provided Bamboo YAML specifications (`bamboo-build.yaml` and `bamboo-deploy.yaml`) in Bamboo 9.6 for building a .NET project and deploying it to IIS and a Windows service on a Windows server with an installed Bamboo agent. The guide assumes you have Bamboo 9.6 set up and a Windows agent with .NET 8.0 SDK and PowerShell 7 installed. Since I cannot generate or include images directly, I’ll describe where you would see specific screens in Bamboo’s UI and suggest what the images would depict. If you need visual aids, you can take screenshots of your Bamboo instance at each step or refer to Atlassian’s Bamboo 9.6 documentation for UI visuals.
+
+---
+
+### Step-by-Step Guide to Using Bamboo YAML Specs
+
+#### Prerequisites
+Before starting, ensure:
+- **Bamboo 9.6** is installed and accessible (e.g., `http://your-bamboo-server:8085`).
+- A **Windows Bamboo agent** is online with:
+  - .NET 8.0 SDK installed (for `dotnet` commands).
+  - PowerShell 7 installed (for deployment scripts).
+  - IIS management tools (`WebAdministration` module) installed.
+  - Administrative permissions to manage IIS and Windows services.
+- A **Git repository** containing your .NET project (e.g., hosted on Bitbucket, GitHub, or Bamboo’s internal repository).
+- The Bamboo server is configured to allow YAML Specs (via a linked repository or file import).
+- You have administrative access to Bamboo for configuration.
+
+---
+
+### Step 1: Prepare the Bamboo YAML Files
+1. **Save the YAML Files**:
+   - Copy the updated `bamboo-build.yaml` and `bamboo-deploy.yaml` from the previous response to your local machine or a Git repository linked to Bamboo.
+   - Ensure the files are named correctly and stored in a directory accessible to Bamboo (e.g., `bamboo-specs/` in your repository).
+
+   **bamboo-build.yaml** (builds the .NET project):
+   ```yaml
+   ```yaml
+   ---
+   version: 2
+   plan:
+     project-key: DOTNET
+     key: BUILD
+     name: .NET Project Build
+
+   stages:
+     - build-stage:
+         jobs:
+           - build-job
+
+   build-job:
+     tasks:
+       - checkout:
+           repository: my-dotnet-repo # Replace with actual repository key
+           path: .
+       
+       - script:
+           interpreter: SHELL
+           scripts:
+             - dotnet restore || exit /b 1
+             - dotnet build --configuration Release --no-restore || exit /b 1
+             - dotnet test --configuration Release --no-build --no-restore --logger "trx;LogFileName=test-results.trx" || exit /b 1
+       
+       - script:
+           interpreter: SHELL
+           scripts:
+             - dotnet publish --configuration Release --output ./publish || exit /b 1
+       
+       - artifact:
+           name: build-output
+           pattern: publish/**/*
+           shared: true
+
+   requirements:
+     - capability: system.builder.dotnet.8.0
+       match: equals
+       value: true
+     - capability: system.os
+       match: equals
+       value: windows
+
+   triggers:
+     - polling:
+         period: 180
+
+   notifications:
+     - email:
+         recipients:
+           - build-admin@example.com
+   ---
+   ```
+
+   **bamboo-deploy.yaml** (deploys to IIS and Windows service):
+   ```yaml
+   ```yaml
+   ---
+   version: 2
+   plan:
+     project-key: DOTNET
+     key: DEPLOY
+     name: .NET Project Deploy to IIS and Windows Service
+
+   stages:
+     - deploy-stage:
+         jobs:
+           - deploy-job
+
+   deploy-job:
+     tasks:
+       - artifact:
+           name: build-output
+           source-plan: DOTNET-BUILD
+       
+       - script:
+           interpreter: POWERSHELL
+           scripts:
+             - |
+               # Import IIS module
+               Import-Module WebAdministration -ErrorAction Stop
+               # Stop IIS application pool and site
+               if (Get-WebAppPoolState -Name "MyAppPool" -ErrorAction SilentlyContinue) {
+                 Stop-WebAppPool -Name "MyAppPool" -ErrorAction Stop
+               }
+               if (Get-WebSite -Name "MyWebSite" -ErrorAction SilentlyContinue) {
+                 Stop-WebSite -Name "MyWebSite" -ErrorAction Stop
+               }
+               # Deploy to IIS
+               $iisPath = "C:\inetpub\wwwroot\MyWebSite"
+               if (Test-Path $iisPath) {
+                 Remove-Item -Path "$iisPath\*" -Recurse -Force -ErrorAction Stop
+               } else {
+                 New-Item -Path $iisPath -ItemType Directory -Force -ErrorAction Stop
+               }
+               Copy-Item -Path "./publish/*" -Destination $iisPath -Recurse -Force -ErrorAction Stop
+               # Stop and remove existing Windows service
+               $service = Get-Service -Name "MyService" -ErrorAction SilentlyContinue
+               if ($service) {
+                 Stop-Service -Name "MyService" -ErrorAction Stop
+                 sc.exe delete "MyService" | Out-Null
+               }
+               # Deploy Windows service
+               $servicePath = "C:\Services\MyService"
+               $serviceExe = "$servicePath\MyService.exe"
+               if (!(Test-Path $servicePath)) {
+                 New-Item -Path $servicePath -ItemType Directory -Force -ErrorAction Stop
+               }
+               Copy-Item -Path "./publish/MyService.exe" -Destination $serviceExe -Force -ErrorAction Stop
+               New-Service -Name "MyService" -BinaryPathName $serviceExe -DisplayName "My .NET Service" -StartupType Automatic -ErrorAction Stop
+               # Start IIS and service
+               if (Get-WebAppPoolState -Name "MyAppPool" -ErrorAction SilentlyContinue) {
+                 Start-WebAppPool -Name "MyAppPool" -ErrorAction Stop
+               }
+               if (Get-WebSite -Name "MyWebSite" -ErrorAction SilentlyContinue) {
+                 Start-WebSite -Name "MyWebSite" -ErrorAction Stop
+               }
+               Start-Service -Name "MyService" -ErrorAction Stop
+
+   requirements:
+     - capability: system.os
+       match: equals
+       value: windows
+     - capability: system.builder.dotnet.8.0
+       match: equals
+       value: true
+     - capability: system.powershell
+       match: equals
+       value: 7
+
+   triggers:
+     - manual
+
+   notifications:
+     - email:
+         recipients:
+           - deploy-admin@example.com
+
+   dependencies:
+     - plan: DOTNET-BUILD
+       artifacts:
+         - build-output
+   ---
+   ```
+
+2. **Customize the YAMLs**:
+   - **Repository Key**: In `bamboo-build.yaml`, replace `my-dotnet-repo` with the actual repository key configured in Bamboo (e.g., `my-git-repo`).
+   - **Plan Keys**: Ensure the build plan key is `DOTNET-BUILD` and the deploy plan key is `DOTNET-DEPLOY`. Update `source-plan: DOTNET-BUILD` in `bamboo-deploy.yaml` if the build plan key differs.
+   - **Paths and Names**: In `bamboo-deploy.yaml`, update `MyAppPool`, `MyWebSite`, `C:\inetpub\wwwroot\MyWebSite`, `MyService`, and `C:\Services\MyService` to match your IIS and Windows service setup.
+   - **Email Recipients**: Replace `build-admin@example.com` and `deploy-admin@example.com` with actual email addresses.
+
+   **Image Description**: A screenshot of a text editor (e.g., VS Code) showing `bamboo-build.yaml` with the `repository: my-dotnet-repo` line highlighted and a comment indicating to replace it with the actual repository key.
+
+---
+
+### Step 2: Configure the Bamboo Agent
+1. **Verify Agent Installation**:
+   - Ensure a Windows Bamboo agent is running on the target server where deployment will occur.
+   - Log in to the Bamboo UI (`http://your-bamboo-server:8085`) and navigate to **Administration > Agents**.
+   - Confirm the agent is online (status shows as “Online” with a green checkmark).
+
+   **Image Description**: A screenshot of Bamboo’s “Agents” page showing a Windows agent listed as “Online” with details like agent name and IP address.
+
+2. **Add Agent Capabilities**:
+   - Go to **Administration > Agents > [Your Agent] > Capabilities**.
+   - Add the following capabilities:
+     - `system.os` = `windows`
+     - `system.builder.dotnet.8.0` = `true` (after installing .NET 8.0 SDK)
+     - `system.powershell` = `7` (after installing PowerShell 7)
+   - To install prerequisites on the agent:
+     - Install .NET 8.0 SDK: Download from Microsoft’s .NET site and run the installer.
+     - Install PowerShell 7: Run `winget install --id Microsoft.PowerShell --source winget` or download from GitHub.
+     - Install IIS management tools: Run `Install-WindowsFeature -Name Web-Scripting-Tools` in PowerShell as Administrator.
+   - Verify capabilities by clicking “Detect server capabilities” or manually adding them.
+
+   **Image Description**: A screenshot of the agent’s “Capabilities” tab showing `system.os`, `system.builder.dotnet.8.0`, and `system.powershell` configured with their respective values.
+
+3. **Set Agent Permissions**:
+   - Ensure the agent runs as a user with permissions to:
+     - Manage IIS (app pools and sites).
+     - Create/delete/start/stop Windows services.
+     - Write to paths like `C:\inetpub\wwwroot\MyWebSite` and `C:\Services\MyService`.
+   - Update the agent’s service account in Windows Services (e.g., run as a domain account with admin rights).
+
+   **Image Description**: A screenshot of Windows Services showing the Bamboo agent service properties with the “Log On” tab set to a domain account.
+
+---
+
+### Step 3: Configure the Source Repository
+1. **Link the Repository**:
+   - Go to **Administration > Repositories > Add Repository**.
+   - Configure your Git repository (e.g., GitHub, Bitbucket, or Bamboo’s internal repo).
+     - **Name**: e.g., `my-dotnet-repo`
+     - **Type**: Git
+     - **URL**: Your repository URL (e.g., `https://github.com/your-org/your-repo.git`)
+     - **Authentication**: Add credentials if required.
+   - Save and note the repository key (e.g., `my-dotnet-repo`).
+
+   **Image Description**: A screenshot of Bamboo’s “Add Repository” page filled with Git repository details, including name, URL, and authentication fields.
+
+2. **Add YAML Specs to Repository** (if using Bamboo Specs):
+   - If using Bamboo Specs, place `bamboo-build.yaml` and `bamboo-deploy.yaml` in a `bamboo-specs/` directory in your repository.
+   - Commit and push to the repository.
+   - In Bamboo, go to **Administration > Bamboo Specs > Enable Bamboo Specs** and link the repository containing the YAML files.
+
+   **Image Description**: A screenshot of the repository’s file structure in a Git client (e.g., GitHub) showing `bamboo-specs/bamboo-build.yaml` and `bamboo-specs/bamboo-deploy.yaml`.
+
+---
+
+### Step 4: Import and Validate YAML Specs
+1. **Import Build Plan (`bamboo-build.yaml`)**:
+   - Option 1: **Manual Import**:
+     - Go to **Create > Import Plan > YAML**.
+     - Upload `bamboo-build.yaml` or paste its contents.
+     - Click “Import” to validate and create the plan.
+   - Option 2: **Bamboo Specs**:
+     - If stored in the repository, Bamboo automatically scans the `bamboo-specs/` directory and creates/updates the plan (`DOTNET-BUILD`).
+   - Check for errors in the Bamboo UI (e.g., “Invalid repository key” or “Missing capabilities”).
+
+   **Image Description**: A screenshot of Bamboo’s “Import Plan” page with the YAML import dialog open, showing `bamboo-build.yaml` uploaded or pasted.
+
+2. **Import Deployment Plan (`bamboo-deploy.yaml`)**:
+   - Go to **Deploy > All Deployment Projects > Create Deployment Project**.
+   - Choose **Import YAML** and upload `bamboo-deploy.yaml` or paste its contents.
+   - Ensure the deployment project links to the build plan `DOTNET-BUILD`.
+   - Validate and save.
+
+   **Image Description**: A screenshot of the “Create Deployment Project” page with the YAML import section showing `bamboo-deploy.yaml` contents.
+
+3. **Fix Validation Errors**:
+   - **Repository Error**: If you see “Repository ‘my-dotnet-repo’ not found,” update the `repository` field in `bamboo-build.yaml` to match the repository key from Step 3.
+   - **Capabilities Error**: If “No agent meets requirements,” verify agent capabilities (Step 2).
+   - **Artifact Error**: Ensure the build plan produces the `build-output` artifact and the deploy plan references it correctly.
+   - **Plan Key Error**: Confirm `source-plan: DOTNET-BUILD` matches the build plan’s key.
+
+   **Image Description**: A screenshot of Bamboo’s error log from the import process, highlighting an error like “Repository not found” with the suggested fix.
+
+---
+
+### Step 5: Configure the Build Plan
+1. **Verify Build Plan Settings**:
+   - Go to **Build > All Build Plans > DOTNET-BUILD**.
+   - Confirm the plan has:
+     - **Repository**: Linked to `my-dotnet-repo`.
+     - **Stages**: `build-stage` with `build-job`.
+     - **Tasks**: Checkout, two script tasks (for `dotnet` commands), and artifact task.
+     - **Artifact**: `build-output` with pattern `publish/**/*`.
+     - **Triggers**: Polling every 180 seconds.
+     - **Requirements**: Matches agent capabilities.
+
+   **Image Description**: A screenshot of the “DOTNET-BUILD” plan configuration page showing the stage, job, tasks, and artifact settings.
+
+2. **Test the Build**:
+   - Click **Run > Run Plan**.
+   - Monitor the build logs for errors (e.g., `dotnet restore` failing due to missing dependencies).
+   - Ensure the `publish` directory is created and the `build-output` artifact is stored.
+
+   **Image Description**: A screenshot of the build plan’s “Build Results” page showing a successful build with logs for `dotnet restore`, `build`, `test`, and `publish`.
+
+---
+
+### Step 6: Configure the Deployment Environment
+1. **Create Deployment Environment**:
+   - Go to **Deploy > DOTNET-DEPLOY**.
+   - Create an environment (e.g., “Production”):
+     - Click **Add Environment**.
+     - Name it (e.g., “Production”).
+     - Assign the Windows agent with the required capabilities.
+   - Link the environment to the `deploy-job` tasks from `bamboo-deploy.yaml`.
+
+   **Image Description**: A screenshot of the “DOTNET-DEPLOY” deployment project showing the “Production” environment with tasks listed (artifact download and PowerShell script).
+
+2. **Verify Dependencies**:
+   - Ensure the deployment project references the `DOTNET-BUILD` plan and the `build-output` artifact.
+   - Check that the artifact is available from a successful build.
+
+   **Image Description**: A screenshot of the deployment project’s “Dependencies” tab showing `DOTNET-BUILD` linked with `build-output` artifact selected.
+
+---
+
+### Step 7: Test the Deployment
+1. **Run the Deployment**:
+   - Go to **Deploy > DOTNET-DEPLOY > Production > Deploy**.
+   - Select a successful build from `DOTNET-BUILD`.
+   - Click **Deploy** (manual trigger).
+   - Monitor the deployment logs for PowerShell command output.
+
+   **Image Description**: A screenshot of the “Deploy” page for the “Production” environment, showing the build selection dropdown and the “Deploy” button clicked.
+
+2. **Check for Errors**:
+   - **IIS Errors**: If `Stop-WebAppPool` or `Stop-WebSite` fails, verify `MyAppPool` and `MyWebSite` exist in IIS Manager.
+   - **File Path Errors**: Ensure `C:\inetpub\wwwroot\MyWebSite` and `C:\Services\MyService` are accessible and writable.
+   - **Service Errors**: Confirm `MyService.exe` exists in the artifact and the agent has permissions to create services.
+   - **Permissions**: Run the agent as an admin account if “Access denied” errors occur.
+
+   **Image Description**: A screenshot of the deployment log showing PowerShell command execution, with potential errors like “Cannot find AppPool ‘MyAppPool’” highlighted.
+
+3. **Verify Deployment**:
+   - Check IIS Manager to confirm the website is updated and running.
+   - Open Services (Windows) to verify `MyService` is installed and running.
+   - Test the website (e.g., `http://your-server/MyWebSite`) and service functionality.
+
+   **Image Description**: A screenshot of IIS Manager showing “MyWebSite” running and a screenshot of Windows Services showing “MyService” with “Running” status.
+
+---
+
+### Step 8: Troubleshoot and Maintain
+1. **Common Issues**:
+   - **Build Fails**: Check `dotnet` command logs for missing dependencies or project file errors. Update the `.csproj` file if needed.
+   - **Deployment Fails**: Verify IIS app pool/site names, file paths, and agent permissions. Use `-ErrorAction Stop` in PowerShell to catch errors early.
+   - **No Agents Available**: Add missing capabilities to the agent or assign a different agent.
+
+   **Image Description**: A screenshot of Bamboo’s “Build Logs” or “Deployment Logs” with an error message and the corresponding fix applied.
+
+2. **Use Variables for Flexibility**:
+   - In `bamboo-deploy.yaml`, replace hard-coded paths with Bamboo variables:
+     ```yaml
+     $iisPath = "${bamboo.deploy.iisPath}"
+     $servicePath = "${bamboo.deploy.servicePath}"
+     ```
+   - Define variables in the deployment environment settings (e.g., `deploy.iisPath` = `C:\inetpub\wwwroot\MyWebSite`).
+
+   **Image Description**: A screenshot of the deployment environment’s “Variables” tab with `deploy.iisPath` and `deploy.servicePath` defined.
+
+3. **Monitor and Update**:
+   - Set up email notifications to alert on build/deployment failures.
+   - Regularly update the .NET SDK and PowerShell versions on the agent to match project requirements.
+   - Test changes in a staging environment before applying to production.
+
+   **Image Description**: A screenshot of the “Notifications” settings in the build plan showing email recipients configured.
+
+---
+
+### Additional Notes
+- **For .NET Framework**: If your project uses .NET Framework, replace `bamboo-build.yaml` with the MSBuild version provided earlier:
+  ```yaml
+  - script:
+      interpreter: SHELL
+      scripts:
+        - msbuild MySolution.sln /p:Configuration=Release /t:Restore
+        - msbuild MySolution.sln /p:Configuration=Release
+        - vstest.console MyTests.dll /Logger:trx;LogFileName=test-results.trx
+  - script:
+      interpreter: SHELL
+      scripts:
+        - msbuild MySolution.sln /p:Configuration=Release /t:Publish /p:OutputPath=.\publish
+  ```
+  Update the agent capability to `system.builder.msbuild.17.0` instead of `system.builder.dotnet.8.0`.
+
+- **Security**: Store sensitive data (e.g., repository credentials) in Bamboo’s secure variables or a credential store.
+- **Testing**: Always test in a non-production environment first to avoid disrupting live services.
+- **Documentation**: Refer to Atlassian’s Bamboo 9.6 documentation (e.g., “Bamboo Specs” and “YAML Specs Reference”) for detailed UI guidance.
+
+---
+
+### Summary of Steps with Image Descriptions
+1. **Prepare YAMLs**: Save and customize `bamboo-build.yaml` and `bamboo-deploy.yaml`. (Image: Text editor with YAML files.)
+2. **Configure Agent**: Set up .NET 8.0, PowerShell 7, and IIS tools; add capabilities. (Image: Agent capabilities page.)
+3. **Link Repository**: Configure the Git repository in Bamboo. (Image: Repository settings page.)
+4. **Import YAMLs**: Import build and deploy plans via Bamboo UI or Specs. (Image: YAML import dialog.)
+5. **Configure Build Plan**: Verify tasks, artifacts, and triggers. (Image: Build plan configuration.)
+6. **Configure Deployment**: Set up the “Production” environment and link to build plan. (Image: Deployment project settings.)
+7. **Test Deployment**: Run the build, then deploy manually; check logs. (Image: Deployment execution page with logs.)
+8. **Troubleshoot**: Fix errors and use variables for flexibility. (Image: Error log with fixes applied.)
+
+If you encounter specific errors during any step, share the error messages, and I can provide targeted fixes. For images, use Bamboo’s UI or Atlassian’s documentation to visualize each step, or take screenshots of your setup for reference.<xaiArtifact artifact_id="144750b1-c93d-4d6b-94cf-82c965f1dc32" artifact_version_id="1ce3a71b-f0e8-4a22-8a7a-5a4949bea46b" title="bamboo-deploy.yaml" contentType="text/yaml">
+   ```yaml
+   ---
+   version: 2
+   plan:
+     project-key: DOTNET
+     key: DEPLOY
+     name: .NET Project Deploy to IIS and Windows Service
+
+   stages:
+     - deploy-stage:
+         jobs:
+           - deploy-job
+
+   deploy-job:
+     tasks:
+       - artifact:
+           name: build-output
+           source-plan: DOTNET-BUILD
+       
+       - script:
+           interpreter: POWERSHELL
+           scripts:
+             - |
+               # Import IIS module
+               Import-Module WebAdministration -ErrorAction Stop
+               # Stop IIS application pool and site
+               if (Get-WebAppPoolState -Name "MyAppPool" -ErrorAction SilentlyContinue) {
+                 Stop-WebAppPool -Name "MyAppPool" -ErrorAction Stop
+               }
+               if (Get-WebSite -Name "MyWebSite" -ErrorAction SilentlyContinue) {
+                 Stop-WebSite -Name "MyWebSite" -ErrorAction Stop
+               }
+               # Deploy to IIS
+               $iisPath = "C:\inetpub\wwwroot\MyWebSite"
+               if (Test-Path $iisPath) {
+                 Remove-Item -Path "$iisPath\*" -Recurse -Force -ErrorAction Stop
+               } else {
+                 New-Item -Path $iisPath -ItemType Directory -Force -ErrorAction Stop
+               }
+               Copy-Item -Path "./publish/*" -Destination $iisPath -Recurse -Force -ErrorAction Stop
+               # Stop and remove existing Windows service
+               $service = Get-Service -Name "MyService" -ErrorAction SilentlyContinue
+               if ($service) {
+                 Stop-Service -Name "MyService" -ErrorAction Stop
+                 sc.exe delete "MyService" | Out-Null
+               }
+               # Deploy Windows service
+               $servicePath = "C:\Services\MyService"
+               $serviceExe = "$servicePath\MyService.exe"
+               if (!(Test-Path $servicePath)) {
+                 New-Item -Path $servicePath -ItemType Directory -Force -ErrorAction Stop
+               }
+               Copy-Item -Path "./publish/MyService.exe" -Destination $serviceExe -Force -ErrorAction Stop
+               New-Service -Name "MyService" -BinaryPathName $serviceExe -DisplayName "My .NET Service" -StartupType Automatic -ErrorAction Stop
+               # Start IIS and service
+               if (Get-WebAppPoolState -Name "MyAppPool" -ErrorAction SilentlyContinue) {
+                 Start-WebAppPool -Name "MyAppPool" -ErrorAction Stop
+               }
+               if (Get-WebSite -Name "MyWebSite" -ErrorAction SilentlyContinue) {
+                 Start-WebSite -Name "MyWebSite" -ErrorAction Stop
+               }
+               Start-Service -Name "MyService" -ErrorAction Stop
+
+   requirements:
+     - capability: system.os
+       match: equals
+       value: windows
+     - capability: system.builder.dotnet.8.0
+       match: equals
+       value: true
+     - capability: system.powershell
+       match: equals
+       value: 7
+
+   triggers:
+     - manual
+
+   notifications:
+     - email:
+         recipients:
+           - deploy-admin@example.com
+
+   dependencies:
+     - plan: DOTNET-BUILD
+       artifacts:
+         - build-output
+   ---
+   ```
+
+2. **Customize the YAMLs**:
+   - **Repository Key**: In `bamboo-build.yaml`, replace `my-dotnet-repo` with the actual repository key configured in Bamboo (e.g., `my-git-repo`).
+   - **Plan Keys**: Ensure the build plan key is `DOTNET-BUILD` and the deploy plan key is `DOTNET-DEPLOY`. Update `source-plan: DOTNET-BUILD` in `bamboo-deploy.yaml` if the build plan key differs.
+   - **Paths and Names**: In `bamboo-deploy.yaml`, update `MyAppPool`, `MyWebSite`, `C:\inetpub\wwwroot\MyWebSite`, `MyService`, and `C:\Services\MyService` to match your IIS and Windows service setup.
+   - **Email Recipients**: Replace `build-admin@example.com` and `deploy-admin@example.com` with actual email addresses.
+
+   **Image Description**: A screenshot of a text editor (e.g., VS Code) showing `bamboo-build.yaml` with the `repository: my-dotnet-repo` line highlighted and a comment indicating to replace it with the actual repository key.
+
+---
+
+### Step 2: Configure the Bamboo Agent
+1. **Verify Agent Installation**:
+   - Ensure a Windows Bamboo agent is running on the target server where deployment will occur.
+   - Log in to the Bamboo UI (`http://your-bamboo-server:8085`) and navigate to **Administration > Agents**.
+   - Confirm the agent is online (status shows as “Online” with a green checkmark).
+
+   **Image Description**: A screenshot of Bamboo’s “Agents” page showing a Windows agent listed as “Online” with details like agent name and IP address.
+
+2. **Add Agent Capabilities**:
+   - Go to **Administration > Agents > [Your Agent] > Capabilities**.
+   - Add the following capabilities:
+     - `system.os` = `windows`
+     - `system.builder.dotnet.8.0` = `true` (after installing .NET 8.0 SDK)
+     - `system.powershell` = `7` (after installing PowerShell 7)
+   - To install prerequisites on the agent:
+     - Install .NET 8.0 SDK: Download from Microsoft’s .NET site and run the installer.
+     - Install PowerShell 7: Run `winget install --id Microsoft.PowerShell --source winget` or download from GitHub.
+     - Install IIS management tools: Run `Install-WindowsFeature -Name Web-Scripting-Tools` in PowerShell as Administrator.
+   - Verify capabilities by clicking “Detect server capabilities” or manually adding them.
+
+   **Image Description**: A screenshot of the agent’s “Capabilities” tab showing `system.os`, `system.builder.dotnet.8.0`, and `system.powershell` configured with their respective values.
+
+3. **Set Agent Permissions**:
+   - Ensure the agent runs as a user with permissions to:
+     - Manage IIS (app pools and sites).
+     - Create/delete/start/stop Windows services.
+     - Write to paths like `C:\inetpub\wwwroot\MyWebSite` and `C:\Services\MyService`.
+   - Update the agent’s service account in Windows Services (e.g., run as a domain account with admin rights).
+
+   **Image Description**: A screenshot of Windows Services showing the Bamboo agent service properties with the “Log On” tab set to a domain account.
+
+---
+
+### Step 3: Configure the Source Repository
+1. **Link the Repository**:
+   - Go to **Administration > Repositories > Add Repository**.
+   - Configure your Git repository (e.g., GitHub, Bitbucket, or Bamboo’s internal repo).
+     - **Name**: e.g., `my-dotnet-repo`
+     - **Type**: Git
+     - **URL**: Your repository URL (e.g., `https://github.com/your-org/your-repo.git`)
+     - **Authentication**: Add credentials if required.
+   - Save and note the repository key (e.g., `my-dotnet-repo`).
+
+   **Image Description**: A screenshot of Bamboo’s “Add Repository” page filled with Git repository details, including name, URL, and authentication fields.
+
+2. **Add YAML Specs to Repository** (if using Bamboo Specs):
+   - If using Bamboo Specs, place `bamboo-build.yaml` and `bamboo-deploy.yaml` in a `bamboo-specs/` directory in your repository.
+   - Commit and push to the repository.
+   - In Bamboo, go to **Administration > Bamboo Specs > Enable Bamboo Specs** and link the repository containing the YAML files.
+
+   **Image Description**: A screenshot of the repository’s file structure in a Git client (e.g., GitHub) showing `bamboo-specs/bamboo-build.yaml` and `bamboo-specs/bamboo-deploy.yaml`.
+
+---
+
+### Step 4: Import and Validate YAML Specs
+1. **Import Build Plan (`bamboo-build.yaml`)**:
+   - Option 1: **Manual Import**:
+     - Go to **Create > Import Plan > YAML**.
+     - Upload `bamboo-build.yaml` or paste its contents.
+     - Click “Import” to validate and create the plan.
+   - Option 2: **Bamboo Specs**:
+     - If stored in the repository, Bamboo automatically scans the `bamboo-specs/` directory and creates/updates the plan (`DOTNET-BUILD`).
+   - Check for errors in the Bamboo UI (e.g., “Invalid repository key” or “Missing capabilities”).
+
+   **Image Description**: A screenshot of Bamboo’s “Import Plan” page with the YAML import dialog open, showing `bamboo-build.yaml` uploaded or pasted.
+
+2. **Import Deployment Plan (`bamboo-deploy.yaml`)**:
+   - Go to **Deploy > All Deployment Projects > Create Deployment Project**.
+   - Choose **Import YAML** and upload `bamboo-deploy.yaml` or paste its contents.
+   - Ensure the deployment project links to the build plan `DOTNET-BUILD`.
+   - Validate and save.
+
+   **Image Description**: A screenshot of the “Create Deployment Project” page with the YAML import section showing `bamboo-deploy.yaml` contents.
+
+3. **Fix Validation Errors**:
+   - **Repository Error**: If you see “Repository ‘my-dotnet-repo’ not found,” update the `repository` field in `bamboo-build.yaml` to match the repository key from Step 3.
+   - **Capabilities Error**: If “No agent meets requirements,” verify agent capabilities (Step 2).
+   - **Artifact Error**: Ensure the build plan produces the `build-output` artifact and the deploy plan references it correctly.
+   - **Plan Key Error**: Confirm `source-plan: DOTNET-BUILD` matches the build plan’s key.
+
+   **Image Description**: A screenshot of Bamboo’s error log from the import process, highlighting an error like “Repository not found” with the suggested fix.
+
+---
+
+### Step 5: Configure the Build Plan
+1. **Verify Build Plan Settings**:
+   - Go to **Build > All Build Plans > DOTNET-BUILD**.
+   - Confirm the plan has:
+     - **Repository**: Linked to `my-dotnet-repo`.
+     - **Stages**: `build-stage` with `build-job`.
+     - **Tasks**: Checkout, two script tasks (for `dotnet` commands), and artifact task.
+     - **Artifact**: `build-output` with pattern `publish/**/*`.
+     - **Triggers**: Polling every 180 seconds.
+     - **Requirements**: Matches agent capabilities.
+
+   **Image Description**: A screenshot of the “DOTNET-BUILD” plan configuration page showing the stage, job, tasks, and artifact settings.
+
+2. **Test the Build**:
+   - Click **Run > Run Plan**.
+   - Monitor the build logs for errors (e.g., `dotnet restore` failing due to missing dependencies).
+   - Ensure the `publish` directory is created and the `build-output` artifact is stored.
+
+   **Image Description**: A screenshot of the build plan’s “Build Results” page showing a successful build with logs for `dotnet restore`, `build`, `test`, and `publish`.
+
+---
+
+### Step 6: Configure the Deployment Environment
+1. **Create Deployment Environment**:
+   - Go to **Deploy > DOTNET-DEPLOY**.
+   - Create an environment (e.g., “Production”):
+     - Click **Add Environment**.
+     - Name it (e.g., “Production”).
+     - Assign the Windows agent with the required capabilities.
+   - Link the environment to the `deploy-job` tasks from `bamboo-deploy.yaml`.
+
+   **Image Description**: A screenshot of the “DOTNET-DEPLOY” deployment project showing the “Production” environment with tasks listed (artifact download and PowerShell script).
+
+2. **Verify Dependencies**:
+   - Ensure the deployment project references the `DOTNET-BUILD` plan and the `build-output` artifact.
+   - Check that the artifact is available from a successful build.
+
+   **Image Description**: A screenshot of the deployment project’s “Dependencies” tab showing `DOTNET-BUILD` linked with `build-output` artifact selected.
+
+---
+
+### Step 7: Test the Deployment
+1. **Run the Deployment**:
+   - Go to **Deploy > DOTNET-DEPLOY > Production > Deploy**.
+   - Select a successful build from `DOTNET-BUILD`.
+   - Click **Deploy** (manual trigger).
+   - Monitor the deployment logs for PowerShell command output.
+
+   **Image Description**: A screenshot of the “Deploy” page for the “Production” environment, showing the build selection dropdown and the “Deploy” button clicked.
+
+2. **Check for Errors**:
+   - **IIS Errors**: If `Stop-WebAppPool` or `Stop-WebSite` fails, verify `MyAppPool` and `MyWebSite` exist in IIS Manager.
+   - **File Path Errors**: Ensure `C:\inetpub\wwwroot\MyWebSite` and `C:\Services\MyService` are accessible and writable.
+   - **Service Errors**: Confirm `MyService.exe` exists in the artifact and the agent has permissions to create services.
+   - **Permissions**: Run the agent as an admin account if “Access denied” errors occur.
+
+   **Image Description**: A screenshot of the deployment log showing PowerShell command execution, with potential errors like “Cannot find AppPool ‘MyAppPool’” highlighted.
+
+3. **Verify Deployment**:
+   - Check IIS Manager to confirm the website is updated and running.
+   - Open Services (Windows) to verify `MyService` is installed and running.
+   - Test the website (e.g., `http://your-server/MyWebSite`) and service functionality.
+
+   **Image Description**: A screenshot of IIS Manager showing “MyWebSite” running and a screenshot of Windows Services showing “MyService” with “Running” status.
+
+---
+
+### Step 8: Troubleshoot and Maintain
+1. **Common Issues**:
+   - **Build Fails**: Check `dotnet` command logs for missing dependencies or project file errors. Update the `.csproj` file if needed.
+   - **Deployment Fails**: Verify IIS app pool/site names, file paths, and agent permissions. Use `-ErrorAction Stop` in PowerShell to catch errors early.
+   - **No Agents Available**: Add missing capabilities to the agent or assign a different agent.
+
+   **Image Description**: A screenshot of Bamboo’s “Build Logs” or “Deployment Logs” with an error message and the corresponding fix applied.
+
+2. **Use Variables for Flexibility**:
+   - In `bamboo-deploy.yaml`, replace hard-coded paths with Bamboo variables:
+     ```yaml
+     $iisPath = "${bamboo.deploy.iisPath}"
+     $servicePath = "${bamboo.deploy.servicePath}"
+     ```
+   - Define variables in the deployment environment settings (e.g., `deploy.iisPath` = `C:\inetpub\wwwroot\MyWebSite`).
+
+   **Image Description**: A screenshot of the deployment environment’s “Variables” tab with `deploy.iisPath` and `deploy.servicePath` defined.
+
+3. **Monitor and Update**:
+   - Set up email notifications to alert on build/deployment failures.
+   - Regularly update the .NET SDK and PowerShell versions on the agent to match project requirements.
+   - Test changes in a staging environment before applying to production.
+
+   **Image Description**: A screenshot of the “Notifications” settings in the build plan showing email recipients configured.
+
+---
+
+### Additional Notes
+- **For .NET Framework**: If your project uses .NET Framework, replace `bamboo-build.yaml` with the MSBuild version provided earlier:
+  ```yaml
+  - script:
+      interpreter: SHELL
+      scripts:
+        - msbuild MySolution.sln /p:Configuration=Release /t:Restore
+        - msbuild MySolution.sln /p:Configuration=Release
+        - vstest.console MyTests.dll /Logger:trx;LogFileName=test-results.trx
+  - script:
+      interpreter: SHELL
+      scripts:
+        - msbuild MySolution.sln /p:Configuration=Release /t:Publish /p:OutputPath=.\publish
+  ```
+  Update the agent capability to `system.builder.msbuild.17.0` instead of `system.builder.dotnet.8.0`.
+
+- **Security**: Store sensitive data (e.g., repository credentials) in Bamboo’s secure variables or a credential store.
+- **Testing**: Always test in a non-production environment first to avoid disrupting live services.
+- **Documentation**: Refer to Atlassian’s Bamboo 9.6 documentation (e.g., “Bamboo Specs” and “YAML Specs Reference”) for detailed UI guidance.
+
+---
+
+### Summary of Steps with Image Descriptions
+1. **Prepare YAMLs**: Save and customize `bamboo-build.yaml` and `bamboo-deploy.yaml`. (Image: Text editor with YAML files.)
+2. **Configure Agent**: Set up .NET 8.0, PowerShell 7, and IIS tools; add capabilities. (Image: Agent capabilities page.)
+3. **Link Repository**: Configure the Git repository in Bamboo. (Image: Repository settings page.)
+4. **Import YAMLs**: Import build and deploy plans via Bamboo UI or Specs. (Image: YAML import dialog.)
+5. **Configure Build Plan**: Verify tasks, artifacts, and triggers. (Image: Build plan configuration.)
+6. **Configure Deployment**: Set up the “Production” environment and link to build plan. (Image: Deployment project settings.)
+7. **Test Deployment**: Run the build, then deploy manually; check logs. (Image: Deployment execution page with logs.)
+8. **Troubleshoot**: Fix errors and use variables for flexibility. (Image: Error log with fixes applied.)
+
+If you encounter specific errors during any step, share the error messages, and I can provide targeted fixes. For images, use Bamboo’s UI or Atlassian’s documentation to visualize each step, or take screenshots of your setup for reference.```yaml
+   ```yaml
+   ---
+   version: 2
+   plan:
+     project-key: DOTNET
+     key: DEPLOY
+     name: .NET Project Deploy to IIS and Windows Service
+
+   stages:
+     - deploy-stage:
+         jobs:
+           - deploy-job
+
+   deploy-job:
+     tasks:
+       - artifact:
+           name: build-output
+           source-plan: DOTNET-BUILD
+       
+       - script:
+           interpreter: POWERSHELL
+           scripts:
+             - |
+               # Import IIS module
+               Import-Module WebAdministration -ErrorAction Stop
+               # Stop IIS application pool and site
+               if (Get-WebAppPoolState -Name "MyAppPool" -ErrorAction SilentlyContinue) {
+                 Stop-WebAppPool -Name "MyAppPool" -ErrorAction Stop
+               }
+               if (Get-WebSite -Name "MyWebSite" -ErrorAction SilentlyContinue) {
+                 Stop-WebSite -Name "MyWebSite" -ErrorAction Stop
+               }
+               # Deploy to IIS
+               $iisPath = "C:\inetpub\wwwroot\MyWebSite"
+               if (Test-Path $iisPath) {
+                 Remove-Item -Path "$iisPath\*" -Recurse -Force -ErrorAction Stop
+               } else {
+                 New-Item -Path $iisPath -ItemType Directory -Force -ErrorAction Stop
+               }
+               Copy-Item -Path "./publish/*" -Destination $iisPath -Recurse -Force -ErrorAction Stop
+               # Stop and remove existing Windows service
+               $service = Get-Service -Name "MyService" -ErrorAction SilentlyContinue
+               if ($service) {
+                 Stop-Service -Name "MyService" -ErrorAction Stop
+                 sc.exe delete "MyService" | Out-Null
+               }
+               # Deploy Windows service
+               $servicePath = "C:\Services\MyService"
+               $serviceExe = "$servicePath\MyService.exe"
+               if (!(Test-Path $servicePath)) {
+                 New-Item -Path $servicePath -ItemType Directory -Force -ErrorAction Stop
+               }
+               Copy-Item -Path "./publish/MyService.exe" -Destination $serviceExe -Force -ErrorAction Stop
+               New-Service -Name "MyService" -BinaryPathName $serviceExe -DisplayName "My .NET Service" -StartupType Automatic -ErrorAction Stop
+               # Start IIS and service
+               if (Get-WebAppPoolState -Name "MyAppPool" -ErrorAction SilentlyContinue) {
+                 Start-WebAppPool -Name "MyAppPool" -ErrorAction Stop
+               }
+               if (Get-WebSite -Name "MyWebSite" -ErrorAction SilentlyContinue) {
+                 Start-WebSite -Name "MyWebSite" -ErrorAction Stop
+               }
+               Start-Service -Name "MyService" -ErrorAction Stop
+
+   requirements:
+     - capability: system.os
+       match: equals
+       value: windows
+     - capability: system.builder.dotnet.8.0
+       match: equals
+       value: true
+     - capability: system.powershell
+       match: equals
+       value: 7
+
+   triggers:
+     - manual
+
+   notifications:
+     - email:
+         recipients:
+           - deploy-admin@example.com
+
+   dependencies:
+     - plan: DOTNET-BUILD
+       artifacts:
+         - build-output
+   ---
+   ```
+
+2. **Customize the YAMLs**:
+   - **Repository Key**: In `bamboo-build.yaml`, replace `my-dotnet-repo` with the actual repository key configured in Bamboo (e.g., `my-git-repo`).
+   - **Plan Keys**: Ensure the build plan key is `DOTNET-BUILD` and the deploy plan key is `DOTNET-DEPLOY`. Update `source-plan: DOTNET-BUILD` in `bamboo-deploy.yaml` if the build plan key differs.
+   - **Paths and Names**: In `bamboo-deploy.yaml`, update `MyAppPool`, `MyWebSite`, `C:\inetpub\wwwroot\MyWebSite`, `MyService`, and `C:\Services\MyService` to match your IIS and Windows service setup.
+   - **Email Recipients**: Replace `build-admin@example.com` and `deploy-admin@example.com` with actual email addresses.
+
+   **Image Description**: A screenshot of a text editor (e.g., VS Code) showing `bamboo-build.yaml` with the `repository: my-dotnet-repo` line highlighted and a comment indicating to replace it with the actual repository key.
+
+---
+
+### Step 2: Configure the Bamboo Agent
+1. **Verify Agent Installation**:
+   - Ensure a Windows Bamboo agent is running on the target server where deployment will occur.
+   - Log in to the Bamboo UI (`http://your-bamboo-server:8085`) and navigate to **Administration > Agents**.
+   - Confirm the agent is online (status shows as “Online” with a green checkmark).
+
+   **Image Description**: A screenshot of Bamboo’s “Agents” page showing a Windows agent listed as “Online” with details like agent name and IP address.
+
+2. **Add Agent Capabilities**:
+   - Go to **Administration > Agents > [Your Agent] > Capabilities**.
+   - Add the following capabilities:
+     - `system.os` = `windows`
+     - `system.builder.dotnet.8.0` = `true` (after installing .NET 8.0 SDK)
+     - `system.powershell` = `7` (after installing PowerShell 7)
+   - To install prerequisites on the agent:
+     - Install .NET 8.0 SDK: Download from Microsoft’s .NET site and run the installer.
+     - Install PowerShell 7: Run `winget install --id Microsoft.PowerShell --source winget` or download from GitHub.
+     - Install IIS management tools: Run `Install-WindowsFeature -Name Web-Scripting-Tools` in PowerShell as Administrator.
+   - Verify capabilities by clicking “Detect server capabilities” or manually adding them.
+
+   **Image Description**: A screenshot of the agent’s “Capabilities” tab showing `system.os`, `system.builder.dotnet.8.0`, and `system.powershell` configured with their respective values.
+
+3. **Set Agent Permissions**:
+   - Ensure the agent runs as a user with permissions to:
+     - Manage IIS (app pools and sites).
+     - Create/delete/start/stop Windows services.
+     - Write to paths like `C:\inetpub\wwwroot\MyWebSite` and `C:\Services\MyService`.
+   - Update the agent’s service account in Windows Services (e.g., run as a domain account with admin rights).
+
+   **Image Description**: A screenshot of Windows Services showing the Bamboo agent service properties with the “Log On” tab set to a domain account.
+
+---
+
+### Step 3: Configure the Source Repository
+1. **Link the Repository**:
+   - Go to **Administration > Repositories > Add Repository**.
+   - Configure your Git repository (e.g., GitHub, Bitbucket, or Bamboo’s internal repo).
+     - **Name**: e.g., `my-dotnet-repo`
+     - **Type**: Git
+     - **URL**: Your repository URL (e.g., `https://github.com/your-org/your-repo.git`)
+     - **Authentication**: Add credentials if required.
+   - Save and note the repository key (e.g., `my-dotnet-repo`).
+
+   **Image Description**: A screenshot of Bamboo’s “Add Repository” page filled with Git repository details, including name, URL, and authentication fields.
+
+2. **Add YAML Specs to Repository** (if using Bamboo Specs):
+   - If using Bamboo Specs, place `bamboo-build.yaml` and `bamboo-deploy.yaml` in a `bamboo-specs/` directory in your repository.
+   - Commit and push to the repository.
+   - In Bamboo, go to **Administration > Bamboo Specs > Enable Bamboo Specs** and link the repository containing the YAML files.
+
+   **Image Description**: A screenshot of the repository’s file structure in a Git client (e.g., GitHub) showing `bamboo-specs/bamboo-build.yaml` and `bamboo-specs/bamboo-deploy.yaml`.
+
+---
+
+### Step 4: Import and Validate YAML Specs
+1. **Import Build Plan (`bamboo-build.yaml`)**:
+   - Option 1: **Manual Import**:
+     - Go to **Create > Import Plan > YAML**.
+     - Upload `bamboo-build.yaml` or paste its contents.
+     - Click “Import” to validate and create the plan.
+   - Option 2: **Bamboo Specs**:
+     - If stored in the repository, Bamboo automatically scans the `bamboo-specs/` directory and creates/updates the plan (`DOTNET-BUILD`).
+   - Check for errors in the Bamboo UI (e.g., “Invalid repository key” or “Missing capabilities”).
+
+   **Image Description**: A screenshot of Bamboo’s “Import Plan” page with the YAML import dialog open, showing `bamboo-build.yaml` uploaded or pasted.
+
+2. **Import Deployment Plan (`bamboo-deploy.yaml`)**:
+   - Go to **Deploy > All Deployment Projects > Create Deployment Project**.
+   - Choose **Import YAML** and upload `bamboo-deploy.yaml` or paste its contents.
+   - Ensure the deployment project links to the build plan `DOTNET-BUILD`.
+   - Validate and save.
+
+   **Image Description**: A screenshot of the “Create Deployment Project” page with the YAML import section showing `bamboo-deploy.yaml` contents.
+
+3. **Fix Validation Errors**:
+   - **Repository Error**: If you see “Repository ‘my-dotnet-repo’ not found,” update the `repository` field in `bamboo-build.yaml` to match the repository key from Step 3.
+   - **Capabilities Error**: If “No agent meets requirements,” verify agent capabilities (Step 2).
+   - **Artifact Error**: Ensure the build plan produces the `build-output` artifact and the deploy plan references it correctly.
+   - **Plan Key Error**: Confirm `source-plan: DOTNET-BUILD` matches the build plan’s key.
+
+   **Image Description**: A screenshot of Bamboo’s error log from the import process, highlighting an error like “Repository not found” with the suggested fix.
+
+---
+
+### Step 5: Configure the Build Plan
+1. **Verify Build Plan Settings**:
+   - Go to **Build > All Build Plans > DOTNET-BUILD**.
+   - Confirm the plan has:
+     - **Repository**: Linked to `my-dotnet-repo`.
+     - **Stages**: `build-stage` with `build-job`.
+     - **Tasks**: Checkout, two script tasks (for `dotnet` commands), and artifact task.
+     - **Artifact**: `build-output` with pattern `publish/**/*`.
+     - **Triggers**: Polling every 180 seconds.
+     - **Requirements**: Matches agent capabilities.
+
+   **Image Description**: A screenshot of the “DOTNET-BUILD” plan configuration page showing the stage, job, tasks, and artifact settings.
+
+2. **Test the Build**:
+   - Click **Run > Run Plan**.
+   - Monitor the build logs for errors (e.g., `dotnet restore` failing due to missing dependencies).
+   - Ensure the `publish` directory is created and the `build-output` artifact is stored.
+
+   **Image Description**: A screenshot of the build plan’s “Build Results” page showing a successful build with logs for `dotnet restore`, `build`, `test`, and `publish`.
+
+---
+
+### Step 6: Configure the Deployment Environment
+1. **Create Deployment Environment**:
+   - Go to **Deploy > DOTNET-DEPLOY**.
+   - Create an environment (e.g., “Production”):
+     - Click **Add Environment**.
+     - Name it (e.g., “Production”).
+     - Assign the Windows agent with the required capabilities.
+   - Link the environment to the `deploy-job` tasks from `bamboo-deploy.yaml`.
+
+   **Image Description**: A screenshot of the “DOTNET-DEPLOY” deployment project showing the “Production” environment with tasks listed (artifact download and PowerShell script).
+
+2. **Verify Dependencies**:
+   - Ensure the deployment project references the `DOTNET-BUILD` plan and the `build-output` artifact.
+   - Check that the artifact is available from a successful build.
+
+   **Image Description**: A screenshot of the deployment project’s “Dependencies” tab showing `DOTNET-BUILD` linked with `build-output` artifact selected.
+
+---
+
+### Step 7: Test the Deployment
+1. **Run the Deployment**:
+   - Go to **Deploy > DOTNET-DEPLOY > Production > Deploy**.
+   - Select a successful build from `DOTNET-BUILD`.
+   - Click **Deploy** (manual trigger).
+   - Monitor the deployment logs for PowerShell command output.
+
+   **Image Description**: A screenshot of the “Deploy” page for the “Production” environment, showing the build selection dropdown and the “Deploy” button clicked.
+
+2. **Check for Errors**:
+   - **IIS Errors**: If `Stop-WebAppPool` or `Stop-WebSite` fails, verify `MyAppPool` and `MyWebSite` exist in IIS Manager.
+   - **File Path Errors**: Ensure `C:\inetpub\wwwroot\MyWebSite` and `C:\Services\MyService` are accessible and writable.
+   - **Service Errors**: Confirm `MyService.exe` exists in the artifact and the agent has permissions to create services.
+   - **Permissions**: Run the agent as an admin account if “Access denied” errors occur.
+
+   **Image Description**: A screenshot of the deployment log showing PowerShell command execution, with potential errors like “Cannot find AppPool ‘MyAppPool’” highlighted.
+
+3. **Verify Deployment**:
+   - Check IIS Manager to confirm the website is updated and running.
+   - Open Services (Windows) to verify `MyService` is installed and running.
+   - Test the website (e.g., `http://your-server/MyWebSite`) and service functionality.
+
+   **Image Description**: A screenshot of IIS Manager showing “MyWebSite” running and a screenshot of Windows Services showing “MyService” with “Running” status.
+
+---
+
+### Step 8: Troubleshoot and Maintain
+1. **Common Issues**:
+   - **Build Fails**: Check `dotnet` command logs for missing dependencies or project file errors. Update the `.csproj` file if needed.
+   - **Deployment Fails**: Verify IIS app pool/site names, file paths, and agent permissions. Use `-ErrorAction Stop` in PowerShell to catch errors early.
+   - **No Agents Available**: Add missing capabilities to the agent or assign a different agent.
+
+   **Image Description**: A screenshot of Bamboo’s “Build Logs” or “Deployment Logs” with an error message and the corresponding fix applied.
+
+2. **Use Variables for Flexibility**:
+   - In `bamboo-deploy.yaml`, replace hard-coded paths with Bamboo variables:
+     ```yaml
+     $iisPath = "${bamboo.deploy.iisPath}"
+     $servicePath = "${bamboo.deploy.servicePath}"
+     ```
+   - Define variables in the deployment environment settings (e.g., `deploy.iisPath` = `C:\inetpub\wwwroot\MyWebSite`).
+
+   **Image Description**: A screenshot of the deployment environment’s “Variables” tab with `deploy.iisPath` and `deploy.servicePath` defined.
+
+3. **Monitor and Update**:
+   - Set up email notifications to alert on build/deployment failures.
+   - Regularly update the .NET SDK and PowerShell versions on the agent to match project requirements.
+   - Test changes in a staging environment before applying to production.
+
+   **Image Description**: A screenshot of the “Notifications” settings in the build plan showing email recipients configured.
+
+---
+
+### Additional Notes
+- **For .NET Framework**: If your project uses .NET Framework, replace `bamboo-build.yaml` with the MSBuild version provided earlier:
+  ```yaml
+  - script:
+      interpreter: SHELL
+      scripts:
+        - msbuild MySolution.sln /p:Configuration=Release /t:Restore
+        - msbuild MySolution.sln /p:Configuration=Release
+        - vstest.console MyTests.dll /Logger:trx;LogFileName=test-results.trx
+  - script:
+      interpreter: SHELL
+      scripts:
+        - msbuild MySolution.sln /p:Configuration=Release /t:Publish /p:OutputPath=.\publish
+  ```
+  Update the agent capability to `system.builder.msbuild.17.0` instead of `system.builder.dotnet.8.0`.
+
+- **Security**: Store sensitive data (e.g., repository credentials) in Bamboo’s secure variables or a credential store.
+- **Testing**: Always test in a non-production environment first to avoid disrupting live services.
+- **Documentation**: Refer to Atlassian’s Bamboo 9.6 documentation (e.g., “Bamboo Specs” and “YAML Specs Reference”) for detailed UI guidance.
+
+---
+
+### Summary of Steps with Image Descriptions
+1. **Prepare YAMLs**: Save and customize `bamboo-build.yaml` and `bamboo-deploy.yaml`. (Image: Text editor with YAML files.)
+2. **Configure Agent**: Set up .NET 8.0, PowerShell 7, and IIS tools; add capabilities. (Image: Agent capabilities page.)
+3. **Link Repository**: Configure the Git repository in Bamboo. (Image: Repository settings page.)
+4. **Import YAMLs**: Import build and deploy plans via Bamboo UI or Specs. (Image: YAML import dialog.)
+5. **Configure Build Plan**: Verify tasks, artifacts, and triggers. (Image: Build plan configuration.)
+6. **Configure Deployment**: Set up the “Production” environment and link to build plan. (Image: Deployment project settings.)
+7. **Test Deployment**: Run the build, then deploy manually; check logs. (Image: Deployment execution page with logs.)
+8. **Troubleshoot**: Fix errors and use variables for flexibility. (Image: Error log with fixes applied.)
+
+If you encounter specific errors during any step, share the error messages, and I can provide targeted fixes. For images, use Bamboo’s UI or Atlassian’s documentation to visualize each step, or take screenshots of your setup for reference.
