@@ -1,0 +1,80 @@
+version: 2
+plan:
+  name: Aspire Windows Service CI
+  key: ASPIREWINCI
+  project: ASPIRE
+
+stages:
+  - Build
+  - Test
+  - Package
+
+triggers:
+  - polling:
+      interval: 300
+
+variables:
+  solution.name: MyAspireApp.sln
+  apphost.project: src/MyAspireApp.AppHost
+  service.project: src/MyAspireApp.WindowsService
+  output.path: artifacts
+  aspire.manifest: aspire-manifest.json
+
+source-repository:
+  type: git
+  url: https://github.com/your-repo.git
+  branch: main
+
+tasks:
+  - stage: Build
+    jobs:
+      - name: Build Solution
+        tasks:
+          - script:
+              name: Restore NuGet packages
+              interpreter: powershell
+              script: dotnet restore $solution.name
+
+          - script:
+              name: Build solution
+              interpreter: powershell
+              script: |
+                dotnet build $solution.name -c Release --no-restore
+                if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  - stage: Test
+    jobs:
+      - name: Run Tests
+        tasks:
+          - script:
+              name: Execute unit tests
+              interpreter: powershell
+              script: dotnet test $solution.name -c Release --no-build
+
+  - stage: Package
+    jobs:
+      - name: Package Services
+        tasks:
+          - script:
+              name: Generate Aspire Manifest
+              interpreter: powershell
+              script: |
+                dotnet run --project $apphost.project -- generate -p $output.path/$aspire.manifest
+
+          - script:
+              name: Publish Windows Service
+              interpreter: powershell
+              script: |
+                dotnet publish $service.project -c Release -o $output.path/ServiceBinaries
+                
+                # Include Aspire manifest
+                Copy-Item $output.path/$aspire.manifest $output.path/ServiceBinaries/appsettings.json
+                
+                # Create deployment package
+                Compress-Archive -Path $output.path/ServiceBinaries/* -DestinationPath $output.path/ServicePackage.zip
+
+          - artifacts:
+              name: Save Artifacts
+              location: $output.path
+              pattern: "**/*.zip"
+              shared: true

@@ -1,0 +1,82 @@
+version: 2
+plan:
+  name: Aspire Service Fabric CI
+  key: ASPIRESFCI
+  project: ASPIRE
+
+stages:
+  - Build
+  - Test
+  - Package
+
+triggers:
+  - polling:
+      interval: 300
+
+variables:
+  solution.name: MyAspireApp.sln
+  sf.application: src/MyAspireApp.ServiceFabric
+  apphost.project: src/MyAspireApp.AppHost
+  output.path: artifacts
+  aspire.manifest: aspire-manifest.json
+
+source-repository:
+  type: git
+  url: https://github.com/your-repo.git
+  branch: main
+
+tasks:
+  - stage: Build
+    jobs:
+      - name: Build Solution
+        tasks:
+          - script:
+              name: Restore NuGet packages
+              interpreter: powershell
+              script: dotnet restore $solution.name
+
+          - script:
+              name: Build solution
+              interpreter: powershell
+              script: |
+                dotnet build $solution.name -c Release --no-restore
+                if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  - stage: Test
+    jobs:
+      - name: Run Tests
+        tasks:
+          - script:
+              name: Execute unit tests
+              interpreter: powershell
+              script: dotnet test $solution.name -c Release --no-build
+
+  - stage: Package
+    jobs:
+      - name: Package Services
+        tasks:
+          - script:
+              name: Generate Aspire Manifest
+              interpreter: powershell
+              script: |
+                dotnet run --project $apphost.project -- generate -p $output.path/$aspire.manifest
+
+          - script:
+              name: Build Service Fabric Package
+              interpreter: powershell
+              script: |
+                msbuild $sf.application /t:Package /p:Configuration=Release /p:PackageLocation=$output.path/SFPackage
+                
+                # Inject Aspire configuration
+                $configPath = "$output.path/SFPackage/Config"
+                New-Item -ItemType Directory -Path $configPath -Force
+                Copy-Item $output.path/$aspire.manifest $configPath/appsettings.json
+                
+                # Create deployment artifacts
+                Compress-Archive -Path $output.path/SFPackage/* -DestinationPath $output.path/SFPackage.zip
+
+          - artifacts:
+              name: Save Artifacts
+              location: $output.path
+              pattern: "**/*.zip"
+              shared: true
