@@ -1,0 +1,93 @@
+version: 2
+plan:
+  name: Aspire Service Fabric CI
+  key: ASPIRESFCI
+  project: ASPIRE
+
+stages:
+  - Build
+  - Test
+  - Package
+
+triggers:
+  - polling:
+      interval: 300
+
+variables:
+  solution.name: MyAspireApp.sln
+  sf.application: src/MyAspireApp.ServiceFabric
+  apphost.project: src/MyAspireApp.AppHost
+  output.path: artifacts
+
+source-repository:
+  type: git
+  url: https://github.com/your-repo.git
+  branch: main
+
+tasks:
+  - stage: Build
+    jobs:
+      - name: Build Solution
+        tasks:
+          - script:
+              name: Restore and Build
+              script: |
+                dotnet restore $solution.name
+                dotnet build $solution.name -c Release --no-restore
+
+  - stage: Test
+    jobs:
+      - name: Run Tests
+        tasks:
+          - script:
+              name: Execute tests
+              script: dotnet test $solution.name -c Release --no-build
+
+  - stage: Package
+    jobs:
+      - name: Package Services
+        tasks:
+          - script:
+              name: Generate Aspire Manifest
+              script: dotnet run --project $apphost.project -- generate -p $output.path/aspire-manifest.json
+
+          - script:
+              name: Publish Projects
+              script: |
+                # Get all projects in the solution
+                projects=$(dotnet sln $solution.name list)
+                
+                # Publish each project to its own directory
+                for project in $projects; do
+                  # Skip solution file and non-project entries
+                  if [[ $project == *".sln"* ]] || [[ $project == *"Solution Items"* ]]; then
+                    continue
+                  fi
+                  
+                  project_name=$(basename $project .csproj)
+                  output_dir="$output.path/binaries/$project_name/publish"
+                  
+                  echo "Publishing $project to $output_dir"
+                  dotnet publish $project -c Release -o $output_dir
+                done
+
+          - script:
+              name: Build SF Package
+              script: |
+                # Build Service Fabric package
+                dotnet publish $sf.application -c Release -o $output.path/sf-package
+                
+                # Copy binaries to SF package
+                find $output.path/binaries -mindepth 1 -maxdepth 1 -type d | while read dir; do
+                  project_name=$(basename "$dir")
+                  cp -r "$dir/publish" "$output.path/sf-package/$project_name"
+                done
+                
+                # Include Aspire manifest
+                cp $output.path/aspire-manifest.json "$output.path/sf-package/Config/"
+
+          - artifacts:
+              name: Save Artifacts
+              location: $output.path/sf-package
+              pattern: "**/*"
+              shared: true

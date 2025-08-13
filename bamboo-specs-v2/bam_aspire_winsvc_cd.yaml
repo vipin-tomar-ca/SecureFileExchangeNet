@@ -1,0 +1,84 @@
+version: 2
+plan:
+  name: Aspire Windows Service CD
+  key: ASPIREWINCD
+  project: ASPIRE
+
+dependencies:
+  - ASPIREWINCI
+
+stages:
+  - Deploy to Dev
+  - Deploy to Staging
+  - Deploy to Production
+
+variables:
+  service.name: "MyAspireAppService"
+  service.path: "C:\Services\MyAspireApp"
+  health.endpoint: "http://localhost:8080/health"
+
+tasks:
+  - stage: Deploy to Dev
+    jobs:
+      - name: Deploy to Dev Servers
+        environment: Development
+        tasks:
+          - artifacts.download:
+              plan: ASPIREWINCI
+              pattern: "**/ServicePackage.zip"
+
+          - script:
+              name: Deploy Windows Service
+              interpreter: powershell
+              script: |
+                # List of target servers
+                $servers = @("dev-server-01", "dev-server-02")
+                
+                foreach ($server in $servers) {
+                  # Stop and uninstall existing service
+                  if (Get-Service -ComputerName $server -Name $service.name -ErrorAction SilentlyContinue) {
+                    Stop-Service -ComputerName $server -Name $service.name -Force
+                    sc.exe \\$server delete $service.name
+                  }
+                  
+                  # Deploy files
+                  $session = New-PSSession -ComputerName $server
+                  Invoke-Command -Session $session -ScriptBlock {
+                    param($servicePath)
+                    if (-not (Test-Path $servicePath)) {
+                      New-Item -ItemType Directory -Path $servicePath -Force
+                    }
+                  } -ArgumentList $service.path
+                  
+                  Copy-Item -Path artifacts/ServicePackage.zip -Destination "\\$server\$($service.path.replace(':','$'))\ServicePackage.zip" -Force
+                  Invoke-Command -ComputerName $server -ScriptBlock {
+                    Expand-Archive -Path "$using:service.path\ServicePackage.zip" -DestinationPath $using:service.path -Force
+                  }
+                  
+                  # Install service
+                  $exePath = (Get-ChildItem "\\$server\$($service.path.replace(':','$'))" -Filter *.exe -Recurse | Select-Object -First 1).FullName
+                  if (-not $exePath) { throw "No executable found in package" }
+                  
+                  sc.exe \\$server create $service.name binPath= `"$exePath`" start= auto
+                  sc.exe \\$server description $service.name "MyAspireApp Windows Service"
+                  Start-Service -ComputerName $server -Name $service.name
+                  
+                  # Verify service status
+                  $status = Get-Service -ComputerName $server -Name $service.name
+                  if ($status.Status -ne "Running") {
+                    throw "Service failed to start on $server"
+                  }
+                  
+                  # Verify Aspire health
+                  try {
+                    $healthUrl = "$health.endpoint/ready"
+                    $response = Invoke-WebRequest "http://$($server):8080/health/ready" -UseBasicParsing
+                    if ($response.StatusCode -ne 200) {
+                      throw "Health check failed with status $($response.StatusCode)"
+                    }
+                  } catch {
+                    throw "Health check failed: $($_.Exception.Message)"
+                  }
+                }
+
+  # Similar stages for Staging and Production with different server lists

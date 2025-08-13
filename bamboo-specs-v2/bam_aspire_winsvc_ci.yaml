@@ -1,0 +1,83 @@
+version: 2
+plan:
+  name: Aspire Windows Service CI
+  key: ASPIREWINCI
+  project: ASPIRE
+
+stages:
+  - Build
+  - Test
+  - Package
+
+triggers:
+  - polling:
+      interval: 300
+
+variables:
+  solution.name: MyAspireApp.sln
+  apphost.project: src/MyAspireApp.AppHost
+  output.path: artifacts
+
+source-repository:
+  type: git
+  url: https://github.com/your-repo.git
+  branch: main
+
+tasks:
+  - stage: Build
+    jobs:
+      - name: Build Solution
+        tasks:
+          - script:
+              name: Restore and Build
+              script: |
+                dotnet restore $solution.name
+                dotnet build $solution.name -c Release --no-restore
+
+  - stage: Test
+    jobs:
+      - name: Run Tests
+        tasks:
+          - script:
+              name: Execute tests
+              script: dotnet test $solution.name -c Release --no-build
+
+  - stage: Package
+    jobs:
+      - name: Package Services
+        tasks:
+          - script:
+              name: Generate Aspire Manifest
+              script: dotnet run --project $apphost.project -- generate -p $output.path/aspire-manifest.json
+
+          - script:
+              name: Publish and Package Projects
+              script: |
+                # Get all projects in the solution
+                projects=$(dotnet sln $solution.name list)
+                
+                # Publish and package each project
+                for project in $projects; do
+                  # Skip solution file and non-project entries
+                  if [[ $project == *".sln"* ]] || [[ $project == *"Solution Items"* ]]; then
+                    continue
+                  fi
+                  
+                  project_name=$(basename $project .csproj)
+                  output_dir="$output.path/services/$project_name/publish"
+                  
+                  echo "Publishing $project to $output_dir"
+                  dotnet publish $project -c Release -o $output_dir
+                  
+                  # Copy Aspire manifest
+                  cp $output.path/aspire-manifest.json "$output_dir/appsettings.json"
+                  
+                  # Create zip package
+                  (cd "$output_dir" && zip -r "$output.path/$project_name.zip" ./*)
+                done
+
+          - artifacts:
+              name: Save Artifacts
+              location: $output.path
+              pattern: "*.zip"
+              shared: true

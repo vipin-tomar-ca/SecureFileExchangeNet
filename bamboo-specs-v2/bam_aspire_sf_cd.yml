@@ -1,0 +1,80 @@
+version: 2
+plan:
+  name: Aspire Service Fabric CD
+  key: ASPIRESFCD
+  project: ASPIRE
+
+dependencies:
+  - ASPIRESFCI
+
+stages:
+  - Deploy to Dev
+  - Deploy to Staging
+  - Deploy to Production
+
+variables:
+  sf.cluster.dev: "tcp://sf-dev-cluster:19000"
+  sf.cluster.prod: "tcp://sf-prod-cluster:19000"
+  sf.application.name: "fabric:/MyAspireApp"
+  health.endpoint: "http://localhost:8080/health"
+
+tasks:
+  - stage: Deploy to Dev
+    jobs:
+      - name: Deploy to Dev Cluster
+        environment: Development
+        tasks:
+          - artifacts.download:
+              plan: ASPIRESFCI
+              pattern: "**/SFPackage.zip"
+
+          - script:
+              name: Unpack Artifacts
+              interpreter: powershell
+              script: Expand-Archive -Path artifacts/SFPackage.zip -DestinationPath sf-package
+
+          - script:
+              name: Deploy Service Fabric App
+              interpreter: powershell
+              script: |
+                Import-Module ServiceFabric
+                
+                # Connect to cluster
+                Connect-ServiceFabricCluster -ConnectionEndpoint $sf.cluster.dev `
+                  -X509Credential -ServerCertThumbprint $bamboo_SF_DEV_THUMBPRINT `
+                  -FindType FindByThumbprint -FindValue $bamboo_SF_DEV_THUMBPRINT `
+                  -StoreLocation LocalMachine -StoreName My
+                
+                # Copy application package
+                Copy-ServiceFabricApplicationPackage -ApplicationPackagePath sf-package `
+                  -ApplicationPackagePathInImageStore MyAspireApp `
+                  -ImageStoreConnectionString $bamboo_SF_IMAGE_STORE
+                
+                # Register application type
+                Register-ServiceFabricApplicationType -ApplicationPathInImageStore MyAspireApp
+                
+                # Create or upgrade application
+                $appExists = Get-ServiceFabricApplication -ApplicationName $sf.application.name -ErrorAction SilentlyContinue
+                if (-not $appExists) {
+                  New-ServiceFabricApplication -ApplicationName $sf.application.name `
+                    -ApplicationTypeName "MyAspireAppType" -ApplicationTypeVersion 1.0.$bamboo.buildNumber
+                } else {
+                  Start-ServiceFabricApplicationUpgrade -ApplicationName $sf.application.name `
+                    -ApplicationTypeVersion 1.0.$bamboo.buildNumber -Monitored -FailureAction Rollback
+                }
+
+          - script:
+              name: Verify Aspire Services
+              interpreter: powershell
+              script: |
+                Start-Sleep -Seconds 30  # Wait for services to initialize
+                $services = (Get-Content sf-package/Config/appsettings.json | ConvertFrom-Json).services
+                foreach ($service in $services.PSObject.Properties) {
+                  $healthUrl = "$health.endpoint/$($service.Name)"
+                  $response = Invoke-WebRequest $healthUrl -UseBasicParsing
+                  if ($response.StatusCode -ne 200) {
+                    throw "Service $($service.Name) failed health check"
+                  }
+                }
+
+  # Similar stages for Staging and Production with different cluster credentials
