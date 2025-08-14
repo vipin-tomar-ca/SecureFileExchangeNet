@@ -47,34 +47,17 @@ tasks:
       - name: Package Services
         tasks:
           - script:
-              name: Generate Aspire Manifest
-              script: dotnet run --project $apphost.project -- generate -p $output.path/aspire-manifest.json
+            interpreter: BINSH_OR_CMDEXE
+            file: scripts/generate_manifest
+            working-dir: rgService
+            description: Generate Aspire Manifest
 
           - script:
-              name: Publish and Package Projects
-              script: |
-                # Get all projects in the solution
-                projects=$(dotnet sln $solution.name list)
-                
-                # Publish and package each project
-                for project in $projects; do
-                  # Skip solution file and non-project entries
-                  if [[ $project == *".sln"* ]] || [[ $project == *"Solution Items"* ]]; then
-                    continue
-                  fi
-                  
-                  project_name=$(basename $project .csproj)
-                  output_dir="$output.path/services/$project_name/publish"
-                  
-                  echo "Publishing $project to $output_dir"
-                  dotnet publish $project -c Release -o $output_dir
-                  
-                  # Copy Aspire manifest
-                  cp $output.path/aspire-manifest.json "$output_dir/appsettings.json"
-                  
-                  # Create zip package
-                  (cd "$output_dir" && zip -r "$output.path/$project_name.zip" ./*)
-                done
+            interpreter: BINSH_OR_CMDEXE
+            file: scripts/publish_and_package
+            working-dir: rgService
+            description: Publish and Package Projects
+
 
           - artifacts:
               name: Save Artifacts
