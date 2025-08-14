@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+# Detect the AppHost project from the solution
+apphost_project=$(dotnet sln "$solution.name" list | grep -i "AppHost.csproj" | tr -d '\r')
+
+if [ -z "$apphost_project" ]; then
+  echo "❌ No AppHost project found in solution."
+  exit 1
+fi
+
+echo "✅ Found AppHost project: $apphost_project"
+
+# Generate Aspire manifest
+dotnet run --project "$apphost_project" --generate -p "$output.path/aspire-manifest.json"

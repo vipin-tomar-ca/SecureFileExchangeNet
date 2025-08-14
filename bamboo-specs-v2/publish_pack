@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+# Get all projects in the solution
+projects=$(dotnet sln "$solution.name" list)
+
+for project in $projects; do
+  # Skip solution file and non-project entries
+  if [[ $project == *".sln" ]] || [[ $project == *"Solution Items"* ]]; then
+    continue
+  fi
+
+  project_name=$(basename "$project" .csproj)
+  output_dir="$output.path/services/$project_name/publish"
+
+  echo "📦 Publishing $project to $output_dir"
+  dotnet publish "$project" -c Release -o "$output_dir"
+
+  # Copy Aspire manifest only for non-AppHost projects if needed
+  cp "$output.path/aspire-manifest.json" "$output_dir/appsettings.json"
+
+  # Create zip package
+  (cd "$output_dir" && zip -r "$output.path/$project_name.zip" ./*)
+done
