@@ -47,16 +47,16 @@ tasks:
       - name: Package Services
         tasks:
           - script:
-            interpreter: BINSH_OR_CMDEXE
-            file: scripts/generate_manifest
-            working-dir: rgService
-            description: Generate Aspire Manifest
+            interpreter: POWERSHELL
+            file: bamboo-specs-v2/generate_manifest.ps1
+            description: Generate Aspire Manifest (Windows)
+            arguments: -OutputPath "$output.path"
 
           - script:
-            interpreter: BINSH_OR_CMDEXE
-            file: scripts/publish_and_package
-            working-dir: rgService
-            description: Publish and Package Projects
+            interpreter: POWERSHELL
+            file: bamboo-specs-v2/publish_pack.ps1
+            description: Publish and Package Projects (Windows)
+            arguments: -OutputPath "$output.path"
 
 
           - artifacts:

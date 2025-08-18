@@ -2,13 +2,15 @@
 set -e
 
 # Get all projects in the solution
-projects=$(dotnet sln "$solution.name" list)
+projects=$(dotnet sln list)
 
 for project in $projects; do
   # Skip solution file and non-project entries
-  if [[ $project == *".sln" ]] || [[ $project == *"Solution Items"* ]]; then
-    continue
-  fi
+  case "$project" in
+    *.sln|*"Solution Items"*)
+      continue
+      ;;
+  esac
 
   project_name=$(basename "$project" .csproj)
   output_dir="$output.path/services/$project_name/publish"
