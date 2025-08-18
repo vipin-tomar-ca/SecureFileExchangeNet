@@ -1,0 +1,737 @@
+version: 2
+plan:
+  name: Secure File Exchange CI/CD
+  key: SFECI
+  project: SFE
+
+stages:
+  - Build
+  - Test
+  - Package
+  - Deploy-Dev
+  - Deploy-SF-Dev
+  - Deploy-SF-Test
+  - Deploy-Staging
+  - Deploy-Prod
+
+triggers:
+  - polling:
+      interval: 300
+
+variables:
+  solution.name: SecureFileExchange.sln
+  output.path: artifacts
+  # Deployment variables
+  dev.deployment.target: "dev-server"
+  staging.deployment.target: "staging-cluster"
+  prod.deployment.target: "production-cluster"
+  # Environment-specific settings
+  dev.connection: "DEV-SSH"
+  staging.connection: "STAGING-SSH"
+  prod.connection: "PROD-SSH"
+  # Service Fabric settings
+  sf.application: "ServiceFabricApp"
+  sf.cluster.connection.dev: "DEV-SF-CLUSTER"
+  sf.cluster.connection.test: "TEST-SF-CLUSTER"
+  sf.cluster.endpoint.dev: "localhost:19000"
+  sf.cluster.endpoint.test: "test-cluster:19000"
+
+source-repository:
+  type: git
+  url: https://github.com/your-repo/SecureFileExchangeNet.git
+  branch: main
+
+tasks:
+  - stage: Build
+    jobs:
+      - name: Build Solution
+        tasks:
+          - script:
+              name: Restore and Build
+              script: |
+                dotnet restore $solution.name
+                dotnet build $solution.name -c Release --no-restore
+
+  - stage: Test
+    jobs:
+      - name: Run Tests
+        tasks:
+          - script:
+              name: Execute tests
+              script: dotnet test $solution.name -c Release --no-build
+
+  - stage: Package
+    jobs:
+      - name: Package Services (Windows)
+        tasks:
+          - script:
+              name: Generate Aspire Manifest (Windows)
+              interpreter: POWERSHELL
+              script: |
+                $ErrorActionPreference = 'Stop'
+                $OutputPath = "$env:bamboo_output_path"
+                if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = "artifacts" }
+                
+                New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+                
+                # Detect AppHost project from solution
+                $projects = & dotnet sln list | ForEach-Object { $_.Trim() }
+                if ($LASTEXITCODE -ne 0) { throw "Failed to list projects in solution" }
+                $appHost = $projects | Where-Object { $_ -match 'AppHost\.csproj$' } | Select-Object -First 1
+                if (-not $appHost) { throw "No AppHost project found in solution" }
+                
+                Write-Host "Found AppHost project: $appHost"
+                & dotnet run --project "$appHost" -- generate -p (Join-Path $OutputPath 'aspire-manifest.json')
+                if ($LASTEXITCODE -ne 0) { throw "Failed to generate Aspire manifest" }
+
+          - script:
+              name: Publish and Package (Windows)
+              interpreter: POWERSHELL
+              script: |
+                $ErrorActionPreference = 'Stop'
+                $OutputPath = "$env:bamboo_output_path"
+                if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = "artifacts" }
+                
+                Write-Host "Using output path: $OutputPath"
+                New-Item -ItemType Directory -Force -Path $OutputPath | Out-Null
+                
+                # List projects from current directory solution
+                $projectsRaw = & dotnet sln list | ForEach-Object { $_.Trim() }
+                if ($LASTEXITCODE -ne 0) { throw "Failed to list projects in solution" }
+                
+                $projects = $projectsRaw | Where-Object { $_ -like '*.csproj' }
+                if (-not $projects) { throw "No .csproj projects found in solution" }
+                
+                foreach ($project in $projects) {
+                    $projectPath = $project -replace '^["\s]+|["\s]+$', ''
+                    $projectName = [System.IO.Path]::GetFileNameWithoutExtension($projectPath)
+                    $outputDir = Join-Path $OutputPath (Join-Path 'services' (Join-Path $projectName 'publish'))
+                    
+                    Write-Host "Publishing $projectPath to $outputDir"
+                    New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+                    
+                    & dotnet publish "$projectPath" -c Release -o "$outputDir"
+                    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for '$projectPath'" }
+                    
+                    $manifestPath = Join-Path $OutputPath 'aspire-manifest.json'
+                    if (Test-Path $manifestPath) {
+                        Copy-Item -Force -Path $manifestPath -Destination (Join-Path $outputDir 'appsettings.json')
+                    } else {
+                        Write-Host "Manifest not found at $manifestPath; skipping copy"
+                    }
+                    
+                    $zipPath = Join-Path $OutputPath ("$projectName.zip")
+                    if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+                    Compress-Archive -Path (Join-Path $outputDir '*') -DestinationPath $zipPath -Force
+                    Write-Host "Packaged $zipPath"
+                }
+                
+                # Clean up temporary files
+                Write-Host "Cleaning up temporary files..."
+                $servicesDir = Join-Path $OutputPath 'services'
+                if (Test-Path $servicesDir) {
+                    Remove-Item -Recurse -Force $servicesDir
+                    Write-Host "Removed temporary services directory"
+                }
+                
+                $manifestPath = Join-Path $OutputPath 'aspire-manifest.json'
+                if (Test-Path $manifestPath) {
+                    Remove-Item -Force $manifestPath
+                    Write-Host "Removed temporary manifest file"
+                }
+                
+                # List remaining zip files
+                $zipFiles = Get-ChildItem -Path $OutputPath -Filter "*.zip"
+                Write-Host "Final artifacts:"
+                foreach ($zip in $zipFiles) {
+                    Write-Host "  - $($zip.Name)"
+                }
+
+      - name: Package Services (Linux)
+        tasks:
+          - script:
+              name: Generate Aspire Manifest (Linux)
+              script: |
+                # Detect the AppHost project from the solution
+                apphost_project=$(dotnet sln list | grep -i "AppHost.csproj" | tr -d '\r')
+                
+                if [ -z "$apphost_project" ]; then
+                  echo "No AppHost project found in solution."
+                  exit 1
+                fi
+                
+                echo "Found AppHost project: $apphost_project"
+                dotnet run --project "$apphost_project" --generate -p "$output.path/aspire-manifest.json"
+
+          - script:
+              name: Publish and Package (Linux)
+              script: |
+                # Get all projects in the solution
+                projects=$(dotnet sln list)
+                
+                for project in $projects; do
+                  # Skip solution file and non-project entries
+                  case "$project" in
+                    *.sln|*"Solution Items"*)
+                      continue
+                      ;;
+                  esac
+                  
+                  project_name=$(basename "$project" .csproj)
+                  output_dir="$output.path/services/$project_name/publish"
+                  
+                  echo "Publishing $project to $output_dir"
+                  dotnet publish "$project" -c Release -o "$output_dir"
+                  
+                  # Copy Aspire manifest to appsettings.json if present
+                  if [ -f "$output.path/aspire-manifest.json" ]; then
+                    cp "$output.path/aspire-manifest.json" "$output_dir/appsettings.json"
+                  fi
+                  
+                  # Create zip package
+                  (cd "$output_dir" && zip -r "$output.path/$project_name.zip" ./*)
+                done
+                
+                # Clean up temporary files
+                echo "Cleaning up temporary files..."
+                if [ -d "$output.path/services" ]; then
+                  rm -rf "$output.path/services"
+                  echo "Removed temporary services directory"
+                fi
+                
+                if [ -f "$output.path/aspire-manifest.json" ]; then
+                  rm "$output.path/aspire-manifest.json"
+                  echo "Removed temporary manifest file"
+                fi
+                
+                # List remaining zip files
+                echo "Final artifacts:"
+                for zip_file in "$output.path"/*.zip; do
+                  if [ -f "$zip_file" ]; then
+                    echo "  - $(basename "$zip_file")"
+                  fi
+                done
+
+          - artifacts:
+              name: Save Artifacts
+              location: $output.path
+              pattern: "*.zip"
+              shared: true
+
+  # Development Deployment
+  - stage: Deploy-Dev
+    jobs:
+      - name: Deploy to Development (Linux)
+        tasks:
+          - script:
+              name: Deploy Services to Dev
+              script: |
+                echo "Deploying to Development Environment..."
+                
+                # Extract and deploy each service
+                for zip_file in $output.path/*.zip; do
+                  if [ -f "$zip_file" ]; then
+                    service_name=$(basename "$zip_file" .zip)
+                    echo "Deploying $service_name..."
+                    
+                    # Create deployment directory
+                    mkdir -p /tmp/deploy/$service_name
+                    
+                    # Extract zip
+                    unzip -q "$zip_file" -d /tmp/deploy/$service_name
+                    
+                    # Deploy to dev server (example using SSH)
+                    # ssh $dev.connection "mkdir -p /opt/services/$service_name"
+                    # scp -r /tmp/deploy/$service_name/* $dev.connection:/opt/services/$service_name/
+                    
+                    # For now, just copy to local dev directory
+                    mkdir -p ./deploy/dev/$service_name
+                    cp -r /tmp/deploy/$service_name/* ./deploy/dev/$service_name/
+                    
+                    echo "✅ $service_name deployed to dev"
+                  fi
+                done
+                
+                # Clean up
+                rm -rf /tmp/deploy
+                
+                echo "🎉 Development deployment completed!"
+
+      - name: Deploy to Development (Windows)
+        tasks:
+          - script:
+              name: Deploy Services to Dev (Windows)
+              interpreter: POWERSHELL
+              script: |
+                Write-Host "Deploying to Development Environment..."
+                
+                $OutputPath = "$env:bamboo_output_path"
+                if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = "artifacts" }
+                
+                # Extract and deploy each service
+                $zipFiles = Get-ChildItem -Path $OutputPath -Filter "*.zip"
+                foreach ($zipFile in $zipFiles) {
+                    $serviceName = [System.IO.Path]::GetFileNameWithoutExtension($zipFile.Name)
+                    Write-Host "Deploying $serviceName..."
+                    
+                    # Create deployment directory
+                    $deployDir = Join-Path $env:TEMP "deploy\$serviceName"
+                    New-Item -ItemType Directory -Force -Path $deployDir | Out-Null
+                    
+                    # Extract zip
+                    Expand-Archive -Path $zipFile.FullName -DestinationPath $deployDir -Force
+                    
+                    # Deploy to dev server (example using SSH)
+                    # ssh $env:bamboo_dev_connection "mkdir -p /opt/services/$serviceName"
+                    # scp -r $deployDir\* $env:bamboo_dev_connection:/opt/services/$serviceName/
+                    
+                    # For now, just copy to local dev directory
+                    $localDeployDir = ".\deploy\dev\$serviceName"
+                    New-Item -ItemType Directory -Force -Path $localDeployDir | Out-Null
+                    Copy-Item -Path "$deployDir\*" -Destination $localDeployDir -Recurse -Force
+                    
+                    Write-Host "✅ $serviceName deployed to dev"
+                }
+                
+                # Clean up
+                Remove-Item -Recurse -Force (Join-Path $env:TEMP "deploy") -ErrorAction SilentlyContinue
+                Write-Host "🎉 Development deployment completed!"
+
+  # Service Fabric Development Deployment
+  - stage: Deploy-SF-Dev
+    jobs:
+      - name: Deploy to Service Fabric Dev
+        tasks:
+          - script:
+              name: Build Service Fabric Package
+              script: |
+                echo "Building Service Fabric package for Dev..."
+                
+                # Create SF package directory
+                mkdir -p $output.path/sf-package-dev
+                
+                # Copy service binaries to SF package structure
+                for zip_file in $output.path/*.zip; do
+                  if [ -f "$zip_file" ]; then
+                    service_name=$(basename "$zip_file" .zip)
+                    echo "Adding $service_name to SF package..."
+                    
+                    # Extract service to SF package
+                    mkdir -p $output.path/sf-package-dev/$service_name
+                    unzip -q "$zip_file" -d $output.path/sf-package-dev/$service_name
+                    
+                    # Create service manifest if it doesn't exist
+                    if [ ! -f "$output.path/sf-package-dev/$service_name/ServiceManifest.xml" ]; then
+                      cat > $output.path/sf-package-dev/$service_name/ServiceManifest.xml << EOF
+                <?xml version="1.0" encoding="utf-8"?>
+                <ServiceManifest Name="$service_name" Version="1.0.0" xmlns="http://schemas.microsoft.com/2011/01/fabric">
+                  <CodePackage Name="Code" Version="1.0.0">
+                    <EntryPoint>
+                      <ExeHost>
+                        <Program>$service_name.exe</Program>
+                      </ExeHost>
+                    </EntryPoint>
+                  </CodePackage>
+                  <ConfigPackage Name="Config" Version="1.0.0" />
+                </ServiceManifest>
+                EOF
+                    fi
+                  fi
+                done
+                
+                # Create application manifest
+                cat > $output.path/sf-package-dev/ApplicationManifest.xml << EOF
+                <?xml version="1.0" encoding="utf-8"?>
+                <ApplicationManifest ApplicationTypeName="$sf.application" ApplicationTypeVersion="1.0.0" xmlns="http://schemas.microsoft.com/2011/01/fabric">
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="ApiGateway" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="BusinessRulesService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="EmailNotificationService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="FileProcessorService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="SftpWorkerService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <DefaultServices>
+                    <Service Name="ApiGatewayService">
+                      <StatelessService ServiceTypeName="ApiGatewayType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="BusinessRulesService">
+                      <StatelessService ServiceTypeName="BusinessRulesServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="EmailNotificationService">
+                      <StatelessService ServiceTypeName="EmailNotificationServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="FileProcessorService">
+                      <StatelessService ServiceTypeName="FileProcessorServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="SftpWorkerService">
+                      <StatelessService ServiceTypeName="SftpWorkerServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                  </DefaultServices>
+                </ApplicationManifest>
+                EOF
+                
+                echo "✅ Service Fabric package created for Dev"
+
+          - script:
+              name: Deploy to Service Fabric Dev Cluster
+              script: |
+                echo "Deploying to Service Fabric Dev Cluster..."
+                
+                # Connect to SF cluster
+                sfctl cluster select --endpoint $sf.cluster.endpoint.dev
+                
+                # Upload application package
+                sfctl application upload --path $output.path/sf-package-dev --show-progress
+                
+                # Provision application type
+                sfctl application provision --application-type-build-path $sf.application
+                
+                # Create application instance
+                sfctl application create --app-name fabric:/$sf.application --app-type $sf.application --app-version 1.0.0
+                
+                echo "✅ Service Fabric application deployed to Dev cluster"
+
+      - name: Deploy to Service Fabric Dev (Windows)
+        tasks:
+          - script:
+              name: Build Service Fabric Package (Windows)
+              interpreter: POWERSHELL
+              script: |
+                Write-Host "Building Service Fabric package for Dev..."
+                
+                $OutputPath = "$env:bamboo_output_path"
+                if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = "artifacts" }
+                
+                # Create SF package directory
+                $sfPackageDir = Join-Path $OutputPath "sf-package-dev"
+                New-Item -ItemType Directory -Force -Path $sfPackageDir | Out-Null
+                
+                # Copy service binaries to SF package structure
+                $zipFiles = Get-ChildItem -Path $OutputPath -Filter "*.zip"
+                foreach ($zipFile in $zipFiles) {
+                    $serviceName = [System.IO.Path]::GetFileNameWithoutExtension($zipFile.Name)
+                    Write-Host "Adding $serviceName to SF package..."
+                    
+                    # Extract service to SF package
+                    $serviceDir = Join-Path $sfPackageDir $serviceName
+                    New-Item -ItemType Directory -Force -Path $serviceDir | Out-Null
+                    Expand-Archive -Path $zipFile.FullName -DestinationPath $serviceDir -Force
+                    
+                    # Create service manifest if it doesn't exist
+                    $manifestPath = Join-Path $serviceDir "ServiceManifest.xml"
+                    if (-not (Test-Path $manifestPath)) {
+                        $manifestContent = @"
+                <?xml version="1.0" encoding="utf-8"?>
+                <ServiceManifest Name="$serviceName" Version="1.0.0" xmlns="http://schemas.microsoft.com/2011/01/fabric">
+                  <CodePackage Name="Code" Version="1.0.0">
+                    <EntryPoint>
+                      <ExeHost>
+                        <Program>$serviceName.exe</Program>
+                      </ExeHost>
+                    </EntryPoint>
+                  </CodePackage>
+                  <ConfigPackage Name="Config" Version="1.0.0" />
+                </ServiceManifest>
+                "@
+                        Set-Content -Path $manifestPath -Value $manifestContent
+                    }
+                }
+                
+                # Create application manifest
+                $appManifestPath = Join-Path $sfPackageDir "ApplicationManifest.xml"
+                $appManifestContent = @"
+                <?xml version="1.0" encoding="utf-8"?>
+                <ApplicationManifest ApplicationTypeName="$env:bamboo_sf_application" ApplicationTypeVersion="1.0.0" xmlns="http://schemas.microsoft.com/2011/01/fabric">
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="ApiGateway" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="BusinessRulesService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="EmailNotificationService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="FileProcessorService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="SftpWorkerService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <DefaultServices>
+                    <Service Name="ApiGatewayService">
+                      <StatelessService ServiceTypeName="ApiGatewayType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="BusinessRulesService">
+                      <StatelessService ServiceTypeName="BusinessRulesServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="EmailNotificationService">
+                      <StatelessService ServiceTypeName="EmailNotificationServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="FileProcessorService">
+                      <StatelessService ServiceTypeName="FileProcessorServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="SftpWorkerService">
+                      <StatelessService ServiceTypeName="SftpWorkerServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                  </DefaultServices>
+                </ApplicationManifest>
+                "@
+                Set-Content -Path $appManifestPath -Value $appManifestContent
+                
+                Write-Host "✅ Service Fabric package created for Dev"
+
+          - script:
+              name: Deploy to Service Fabric Dev Cluster (Windows)
+              interpreter: POWERSHELL
+              script: |
+                Write-Host "Deploying to Service Fabric Dev Cluster..."
+                
+                $OutputPath = "$env:bamboo_output_path"
+                if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = "artifacts" }
+                
+                # Connect to SF cluster
+                $clusterEndpoint = "$env:bamboo_sf_cluster_endpoint_dev"
+                if ([string]::IsNullOrWhiteSpace($clusterEndpoint)) { $clusterEndpoint = "localhost:19000" }
+                
+                sfctl cluster select --endpoint $clusterEndpoint
+                
+                # Upload application package
+                $sfPackageDir = Join-Path $OutputPath "sf-package-dev"
+                sfctl application upload --path $sfPackageDir --show-progress
+                
+                # Provision application type
+                $sfApp = "$env:bamboo_sf_application"
+                if ([string]::IsNullOrWhiteSpace($sfApp)) { $sfApp = "ServiceFabricApp" }
+                sfctl application provision --application-type-build-path $sfApp
+                
+                # Create application instance
+                sfctl application create --app-name "fabric:/$sfApp" --app-type $sfApp --app-version 1.0.0
+                
+                Write-Host "✅ Service Fabric application deployed to Dev cluster"
+
+  # Service Fabric Test Deployment
+  - stage: Deploy-SF-Test
+    jobs:
+      - name: Deploy to Service Fabric Test
+        tasks:
+          - script:
+              name: Build Service Fabric Package for Test
+              script: |
+                echo "Building Service Fabric package for Test..."
+                
+                # Create SF package directory
+                mkdir -p $output.path/sf-package-test
+                
+                # Copy service binaries to SF package structure
+                for zip_file in $output.path/*.zip; do
+                  if [ -f "$zip_file" ]; then
+                    service_name=$(basename "$zip_file" .zip)
+                    echo "Adding $service_name to SF package..."
+                    
+                    # Extract service to SF package
+                    mkdir -p $output.path/sf-package-test/$service_name
+                    unzip -q "$zip_file" -d $output.path/sf-package-test/$service_name
+                    
+                    # Create service manifest if it doesn't exist
+                    if [ ! -f "$output.path/sf-package-test/$service_name/ServiceManifest.xml" ]; then
+                      cat > $output.path/sf-package-test/$service_name/ServiceManifest.xml << EOF
+                <?xml version="1.0" encoding="utf-8"?>
+                <ServiceManifest Name="$service_name" Version="1.0.0" xmlns="http://schemas.microsoft.com/2011/01/fabric">
+                  <CodePackage Name="Code" Version="1.0.0">
+                    <EntryPoint>
+                      <ExeHost>
+                        <Program>$service_name.exe</Program>
+                      </ExeHost>
+                    </EntryPoint>
+                  </CodePackage>
+                  <ConfigPackage Name="Config" Version="1.0.0" />
+                </ServiceManifest>
+                EOF
+                    fi
+                  fi
+                done
+                
+                # Create application manifest for test
+                cat > $output.path/sf-package-test/ApplicationManifest.xml << EOF
+                <?xml version="1.0" encoding="utf-8"?>
+                <ApplicationManifest ApplicationTypeName="$sf.application" ApplicationTypeVersion="1.0.0" xmlns="http://schemas.microsoft.com/2011/01/fabric">
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="ApiGateway" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="BusinessRulesService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="EmailNotificationService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="FileProcessorService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <ServiceManifestImport>
+                    <ServiceManifestRef ServiceManifestName="SftpWorkerService" ServiceManifestVersion="1.0.0" />
+                    <ConfigOverrides />
+                  </ServiceManifestImport>
+                  <DefaultServices>
+                    <Service Name="ApiGatewayService">
+                      <StatelessService ServiceTypeName="ApiGatewayType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="BusinessRulesService">
+                      <StatelessService ServiceTypeName="BusinessRulesServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="EmailNotificationService">
+                      <StatelessService ServiceTypeName="EmailNotificationServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="FileProcessorService">
+                      <StatelessService ServiceTypeName="FileProcessorServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                    <Service Name="SftpWorkerService">
+                      <StatelessService ServiceTypeName="SftpWorkerServiceType">
+                        <SingletonPartition />
+                      </StatelessService>
+                    </Service>
+                  </DefaultServices>
+                </ApplicationManifest>
+                EOF
+                
+                echo "✅ Service Fabric package created for Test"
+
+          - script:
+              name: Deploy to Service Fabric Test Cluster
+              script: |
+                echo "Deploying to Service Fabric Test Cluster..."
+                
+                # Connect to SF cluster
+                sfctl cluster select --endpoint $sf.cluster.endpoint.test
+                
+                # Upload application package
+                sfctl application upload --path $output.path/sf-package-test --show-progress
+                
+                # Provision application type
+                sfctl application provision --application-type-build-path $sf.application
+                
+                # Create application instance
+                sfctl application create --app-name fabric:/$sf.application --app-type $sf.application --app-version 1.0.0
+                
+                echo "✅ Service Fabric application deployed to Test cluster"
+
+  # Staging Deployment
+  - stage: Deploy-Staging
+    jobs:
+      - name: Deploy to Staging
+        tasks:
+          - script:
+              name: Deploy Services to Staging
+              script: |
+                echo "Deploying to Staging Environment..."
+                
+                # Similar deployment logic for staging
+                for zip_file in $output.path/*.zip; do
+                  if [ -f "$zip_file" ]; then
+                    service_name=$(basename "$zip_file" .zip)
+                    echo "Deploying $service_name to staging..."
+                    
+                    mkdir -p /tmp/staging-deploy/$service_name
+                    unzip -q "$zip_file" -d /tmp/staging-deploy/$service_name
+                    
+                    # Deploy to staging cluster
+                    # ssh $staging.connection "mkdir -p /opt/services/$service_name"
+                    # scp -r /tmp/staging-deploy/$service_name/* $staging.connection:/opt/services/$service_name/
+                    
+                    # For now, copy to local staging directory
+                    mkdir -p ./deploy/staging/$service_name
+                    cp -r /tmp/staging-deploy/$service_name/* ./deploy/staging/$service_name/
+                    
+                    echo "✅ $service_name deployed to staging"
+                  fi
+                done
+                
+                rm -rf /tmp/staging-deploy
+                echo "🎉 Staging deployment completed!"
+
+  # Production Deployment
+  - stage: Deploy-Prod
+    jobs:
+      - name: Deploy to Production
+        tasks:
+          - script:
+              name: Deploy Services to Production
+              script: |
+                echo "Deploying to Production Environment..."
+                
+                # Production deployment with additional safety checks
+                for zip_file in $output.path/*.zip; do
+                  if [ -f "$zip_file" ]; then
+                    service_name=$(basename "$zip_file" .zip)
+                    echo "Deploying $service_name to production..."
+                    
+                    mkdir -p /tmp/prod-deploy/$service_name
+                    unzip -q "$zip_file" -d /tmp/prod-deploy/$service_name
+                    
+                    # Production deployment with backup
+                    # ssh $prod.connection "cp -r /opt/services/$service_name /opt/services/$service_name.backup.$(date +%Y%m%d_%H%M%S)"
+                    # ssh $prod.connection "mkdir -p /opt/services/$service_name"
+                    # scp -r /tmp/prod-deploy/$service_name/* $prod.connection:/opt/services/$service_name/
+                    
+                    # For now, copy to local production directory with backup
+                    if [ -d "./deploy/prod/$service_name" ]; then
+                      cp -r "./deploy/prod/$service_name" "./deploy/prod/$service_name.backup.$(date +%Y%m%d_%H%M%S)"
+                    fi
+                    mkdir -p ./deploy/prod/$service_name
+                    cp -r /tmp/prod-deploy/$service_name/* ./deploy/prod/$service_name/
+                    
+                    echo "✅ $service_name deployed to production"
+                  fi
+                done
+                
+                rm -rf /tmp/prod-deploy
+                echo "🎉 Production deployment completed!"
