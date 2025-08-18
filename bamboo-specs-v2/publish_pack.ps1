@@ -50,3 +50,25 @@ foreach ($project in $projects) {
     Compress-Archive -Path (Join-Path $outputDir '*') -DestinationPath $zipPath -Force
     Write-Host "Packaged $zipPath"
 }
+
+# Clean up temporary publish directories and other artifacts, keep only zip files
+Write-Host "Cleaning up temporary files..."
+$servicesDir = Join-Path $OutputPath 'services'
+if (Test-Path $servicesDir) {
+    Remove-Item -Recurse -Force $servicesDir
+    Write-Host "Removed temporary services directory"
+}
+
+# Remove manifest file if it exists (since it's copied to each package)
+$manifestPath = Join-Path $OutputPath 'aspire-manifest.json'
+if (Test-Path $manifestPath) {
+    Remove-Item -Force $manifestPath
+    Write-Host "Removed temporary manifest file"
+}
+
+# List remaining zip files
+$zipFiles = Get-ChildItem -Path $OutputPath -Filter "*.zip"
+Write-Host "Final artifacts:"
+foreach ($zip in $zipFiles) {
+    Write-Host "  - $($zip.Name)"
+}
